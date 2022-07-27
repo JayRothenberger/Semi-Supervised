@@ -209,19 +209,19 @@ def start_training(args, model, train_dset, val_dset, evaluate_on=None, train_st
     # Override arguments if we are using exp_index
     args, args_str = augment_args(args)
 
-    train_steps = args.steps_per_epoch if args.steps_per_epoch is not None else 2 * train_dset.__len__
-    val_steps = val_steps if val_steps is not None else 2 * val_dset.__len__
+    train_steps = train_steps if train_steps is not None else train_dset.__len__
+    val_steps = val_steps if val_steps is not None else val_dset.__len__
 
     print(train_steps, val_steps)
-    
+
     evaluate_on = dict() if evaluate_on is None else evaluate_on
 
     callbacks = [tf.keras.callbacks.EarlyStopping(patience=args.patience,
                                                   restore_best_weights=True,
                                                   min_delta=args.min_delta)]
 
-    return experiment.execute_exp(args, args_str, model, train_dset, train_dset, network_fn, network_params, train_steps,
-                                  val_steps, callbacks=callbacks, evaluate_on=evaluate_on)
+    return experiment.execute_exp(args, args_str, model, train_dset, val_dset, network_fn, network_params,
+                                  0, train_steps, val_steps, callbacks=callbacks, evaluate_on=evaluate_on)
 
 
 def prep_gpu(gpu=False, style='a100'):
@@ -271,6 +271,7 @@ def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, 
                                     model,
                                     to_dataset(train_df, train_image_gen),
                                     to_dataset(val_df, default_image_gen),
+                                    train_steps=args.steps_per_epoch,
                                     evaluate_on={'val': to_flow(val_df, default_image_gen),
                                                  'withheld': to_flow(withheld_df, default_image_gen),
                                                  'test': to_flow(test_df, default_image_gen)}
@@ -329,7 +330,7 @@ if __name__ == '__main__':
         train_fraction=args.train_fraction)
 
     utility = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1. / 255,
-                                                              preprocessing_function=rand_augment_object(0.9, 2,
+                                                              preprocessing_function=rand_augment_object(.5, 2,
                                                                                                          leq_M=False))
     network_params = {'learning_rate': args.lrate,
                       'conv_filters': args.filters,
@@ -343,10 +344,10 @@ if __name__ == '__main__':
 
     network_fn = build_parallel_functional_model
 
-    self_train(args, network_fn, network_params, train_df, val_df, withheld_df, augment_fn=None, evaluate_on=None)
+    # self_train(args, network_fn, network_params, train_df, val_df, withheld_df, augment_fn=None, evaluate_on=None)
 
     val_dset = to_dataset(val_df, utility)
-    explore_image_dataset(val_dset, 5)
+    explore_image_dataset(val_dset, 10)
 
     # tf.keras.utils.plot_model(model, show_shapes=True, show_layer_names=True, expand_nested=True,
     #                          to_file=CURRDIR + '/../visualizations/model.png')

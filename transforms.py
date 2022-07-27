@@ -274,19 +274,19 @@ def autocontrast(image: tf.Tensor, magnitude=None) -> tf.Tensor:
     s3 = scale_channel(image[..., 2])
     image = tf.stack([s1, s2, s3], -1)
 
-    return image
+    return image * 255
 
 
 def posterize(image: tf.Tensor, bits: float) -> tf.Tensor:
     """Equivalent of PIL Posterize."""
 
-    shift = 8 - int(8 * bits)
+    shift = 8 - int(8 * (1 - bits))
 
     image = tf.cast(image * 255.0, tf.uint8)
 
     image = tf.bitwise.left_shift(tf.bitwise.right_shift(image, shift), shift)
 
-    return tf.cast(image, tf.float32) / 255.0
+    return tf.cast(image, tf.float32)
 
 
 def translate_x(image: tf.Tensor, fraction: float, replace: float = 0.0) -> tf.Tensor:
@@ -346,45 +346,13 @@ def contrast(image: tf.Tensor, factor: float) -> tf.Tensor:
     degenerate = tf.ones_like(degenerate, dtype=tf.float32) * mean
     degenerate = tf.clip_by_value(degenerate, 0.0, 255.0)
     degenerate = tf.image.grayscale_to_rgb(tf.cast(degenerate, tf.float32))
-    return tf.cast(blend(degenerate, image, 1 - factor), tf.float32) / 255.0
+    return tf.cast(blend(degenerate, image, 1 - factor), tf.float32)
 
 
 def brightness(image: tf.Tensor, factor: float) -> tf.Tensor:
     """Equivalent of PIL Brightness."""
     degenerate = tf.zeros_like(image) if np.random.choice([True, False], 1) else tf.ones_like(image)
     return blend(degenerate, image, 1 - factor)
-
-
-def sharpness1(image: tf.Tensor, factor: float) -> tf.Tensor:
-    """Implements Sharpness function from PIL using TF ops."""
-    orig_image = tf.cast(image * 255, tf.uint8)
-    image = tf.cast(image * 255, tf.float32)
-    # Make image 4D for conv operation.
-    image = tf.expand_dims(image, 0)
-    # SMOOTH PIL Kernel.
-
-    kernel = tf.constant([[1, 1, 1], [1, 5, 1], [1, 1, 1]],
-                         dtype=tf.float32,
-                         shape=[3, 3, 1, 1]) / 13.
-    # Tile across channel dimension.
-    kernel = tf.tile(kernel, [1, 1, 3, 1])
-    strides = [1, 1, 1, 1]
-    degenerate = tf.nn.depthwise_conv2d(
-        image, kernel, strides, padding='VALID', dilations=[1, 1])
-
-    degenerate = tf.clip_by_value(degenerate, 0.0, 255.0)
-    degenerate = tf.squeeze(tf.cast(degenerate, tf.uint8), [0])
-
-    # For the borders of the resulting image, fill in the values of the
-    # original image.
-    mask = tf.ones_like(degenerate)
-    paddings = [[0, 0]] * (len(orig_image.shape) - 3)
-    padded_mask = tf.pad(mask, paddings + [[1, 1], [1, 1], [0, 0]])
-    padded_degenerate = tf.pad(degenerate, paddings + [[1, 1], [1, 1], [0, 0]])
-    result = tf.where(tf.equal(padded_mask, 1), padded_degenerate, orig_image)
-
-    # Blend the final result.
-    return blend(result, orig_image, factor)
 
 
 def sharpness(image, factor):
@@ -413,7 +381,7 @@ def sharpness(image, factor):
     result = tf.where(tf.equal(padded_mask, 1), padded_degenerate, orig_image)
 
     # Blend the final result.
-    return tf.cast(blend(result, orig_image, factor), tf.float32)
+    return tf.cast(blend(result, orig_image, 1-factor), tf.float32)
 
 
 def equalize(image: tf.Tensor, magnitude=None) -> tf.Tensor:
@@ -446,7 +414,7 @@ def equalize(image: tf.Tensor, magnitude=None) -> tf.Tensor:
             tf.equal(step, 0), lambda: im,
             lambda: tf.gather(build_lut(histo, step), im))
 
-        return tf.cast(result, tf.float32) / 255.0
+        return tf.cast(result, tf.float32)
 
     image = tf.cast(255.0 * image, tf.dtypes.uint8)
     # Assumes RGB for now.  Scales each channel independently
@@ -455,7 +423,7 @@ def equalize(image: tf.Tensor, magnitude=None) -> tf.Tensor:
     s2 = scale_channel(image, 1)
     s3 = scale_channel(image, 2)
     image = tf.stack([s1, s2, s3], -1)
-    return image
+    return tf.cast(image, tf.dtypes.float32)
 
 
 def rotate(image: tf.Tensor, range: float) -> tf.Tensor:
@@ -503,7 +471,8 @@ def rand_augment_object(M, N, leq_M=False):
         :param img: image to augment
         :return: augmented image
         """
-        transforms = [sharpness]
+        transforms = [identity, autocontrast, equalize, rotate, solarize, color, posterize, contrast, brightness,
+                      sharpness, shear_x, shear_y, translate_x, translate_y]
         # needs to take a rank 3 numpy tensor, and return a tensor of the same rank
         for op in np.random.choice(transforms, N):
             img = op(img, np.random.uniform(0, M)) if leq_M else op(img, M)
@@ -512,7 +481,7 @@ def rand_augment_object(M, N, leq_M=False):
     return rand_augment
 
 
-# bad = [autocontrast, equalize, posterize, contrast, sharpness]
-# fixed:
+# bad = [equalize, posterize, contrast]
+# fixed: sharpness, equalize, autocontrast
 transforms = [identity, autocontrast, equalize, rotate, solarize, color, posterize, contrast, brightness,
               sharpness, shear_x, shear_y, translate_x, translate_y]
