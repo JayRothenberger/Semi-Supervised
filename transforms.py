@@ -280,7 +280,7 @@ def autocontrast(image: tf.Tensor, magnitude=None) -> tf.Tensor:
 def posterize(image: tf.Tensor, bits: float) -> tf.Tensor:
     """Equivalent of PIL Posterize."""
 
-    shift = 8 - int(8 * (1 - bits))
+    shift = 8 - int(8 * bits)
 
     image = tf.cast(image * 255.0, tf.uint8)
 
@@ -355,39 +355,25 @@ def brightness(image: tf.Tensor, factor: float) -> tf.Tensor:
     return blend(degenerate, image, 1 - factor)
 
 
-def sharpness(image: tf.Tensor, factor: float) -> tf.Tensor:
+def sharpness1(image: tf.Tensor, factor: float) -> tf.Tensor:
     """Implements Sharpness function from PIL using TF ops."""
-    orig_image = image
-    image = tf.cast(image, tf.float32)
+    orig_image = tf.cast(image * 255, tf.uint8)
+    image = tf.cast(image * 255, tf.float32)
     # Make image 4D for conv operation.
     image = tf.expand_dims(image, 0)
     # SMOOTH PIL Kernel.
-    if len(orig_image.shape) == 3:
-        kernel = tf.constant([[1, 1, 1], [1, 5, 1], [1, 1, 1]],
-                             dtype=tf.float32,
-                             shape=[3, 3, 1, 1]) / 13.
-        # Tile across channel dimension.
-        kernel = tf.tile(kernel, [1, 1, 3, 1])
-        strides = [1, 1, 1, 1]
-        degenerate = tf.nn.depthwise_conv2d(
-            image, kernel, strides, padding='VALID', dilations=[1, 1])
-    elif len(orig_image.shape) == 4:
-        kernel = tf.constant([[1, 1, 1], [1, 5, 1], [1, 1, 1]],
-                             dtype=tf.float32,
-                             shape=[1, 3, 3, 1, 1]) / 13.
-        strides = [1, 1, 1, 1, 1]
-        # Run the kernel across each channel
-        channels = tf.split(image, 3, axis=-1)
-        degenerates = [
-            tf.nn.conv3d(channel, kernel, strides, padding='VALID',
-                         dilations=[1, 1, 1, 1, 1])
-            for channel in channels
-        ]
-        degenerate = tf.concat(degenerates, -1)
-    else:
-        raise ValueError('Bad image rank: {}'.format(image.shape.rank))
-    degenerate = tf.clip_by_value(degenerate, 0.0, 1.0)
-    degenerate = tf.squeeze(tf.cast(degenerate, tf.float32), [0])
+
+    kernel = tf.constant([[1, 1, 1], [1, 5, 1], [1, 1, 1]],
+                         dtype=tf.float32,
+                         shape=[3, 3, 1, 1]) / 13.
+    # Tile across channel dimension.
+    kernel = tf.tile(kernel, [1, 1, 3, 1])
+    strides = [1, 1, 1, 1]
+    degenerate = tf.nn.depthwise_conv2d(
+        image, kernel, strides, padding='VALID', dilations=[1, 1])
+
+    degenerate = tf.clip_by_value(degenerate, 0.0, 255.0)
+    degenerate = tf.squeeze(tf.cast(degenerate, tf.uint8), [0])
 
     # For the borders of the resulting image, fill in the values of the
     # original image.
@@ -399,6 +385,35 @@ def sharpness(image: tf.Tensor, factor: float) -> tf.Tensor:
 
     # Blend the final result.
     return blend(result, orig_image, factor)
+
+
+def sharpness(image, factor):
+    """Implements Sharpness function from PIL using TF ops."""
+    orig_image = tf.cast(image * 255, tf.uint8)
+    image = tf.cast(image * 255, tf.float32)
+    # Make image 4D for conv operation.
+    image = tf.expand_dims(image, 0)
+    # SMOOTH PIL Kernel.
+    kernel = tf.constant(
+        [[1, 1, 1], [1, 5, 1], [1, 1, 1]], dtype=tf.float32,
+        shape=[3, 3, 1, 1]) / 13.
+    # Tile across channel dimension.
+    kernel = tf.tile(kernel, [1, 1, 3, 1])
+    strides = [1, 1, 1, 1]
+    degenerate = tf.nn.depthwise_conv2d(
+        image, kernel, strides, padding='VALID', dilations=[1, 1])
+    degenerate = tf.clip_by_value(degenerate, 0.0, 255.0)
+    degenerate = tf.squeeze(tf.cast(degenerate, tf.uint8), [0])
+
+    # For the borders of the resulting image, fill in the values of the
+    # original image.
+    mask = tf.ones_like(degenerate)
+    padded_mask = tf.pad(mask, [[1, 1], [1, 1], [0, 0]])
+    padded_degenerate = tf.pad(degenerate, [[1, 1], [1, 1], [0, 0]])
+    result = tf.where(tf.equal(padded_mask, 1), padded_degenerate, orig_image)
+
+    # Blend the final result.
+    return tf.cast(blend(result, orig_image, factor), tf.float32)
 
 
 def equalize(image: tf.Tensor, magnitude=None) -> tf.Tensor:
@@ -447,7 +462,7 @@ def rotate(image: tf.Tensor, range: float) -> tf.Tensor:
     """Rotates the image by degrees either clockwise or counterclockwise.
   Args:
     image: An image Tensor of type float32.
-    degrees: Float, a scalar angle in degrees to rotate all images by. If
+    range: Float, a scalar angle in [0, 1] to rotate all images by. If
       degrees is positive the image will be rotated clockwise otherwise it will
       be rotated counterclockwise.
   Returns:
@@ -488,11 +503,16 @@ def rand_augment_object(M, N, leq_M=False):
         :param img: image to augment
         :return: augmented image
         """
-        transforms = [identity, autocontrast, equalize, rotate, solarize, color, posterize, contrast, brightness,
-                      sharpness, shear_x, shear_y, translate_x, translate_y]
+        transforms = [sharpness]
         # needs to take a rank 3 numpy tensor, and return a tensor of the same rank
         for op in np.random.choice(transforms, N):
             img = op(img, np.random.uniform(0, M)) if leq_M else op(img, M)
         return img
 
     return rand_augment
+
+
+# bad = [autocontrast, equalize, posterize, contrast, sharpness]
+# fixed:
+transforms = [identity, autocontrast, equalize, rotate, solarize, color, posterize, contrast, brightness,
+              sharpness, shear_x, shear_y, translate_x, translate_y]

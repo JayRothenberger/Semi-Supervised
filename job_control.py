@@ -1,7 +1,7 @@
 """
 JobIterator
 Author: Andrew H. Fagg
-Modified by: Alan Lee
+Modified by: Alan Lee, Jay Rothenberger
 Translate a dictionary containing parameter/list pairs (key/value) into a Cartesian product
 of all combinations of possible parameter values.
 Internally, the Cartesian product is stored as a list of dictionaries (parameter/value pairs).
@@ -66,7 +66,7 @@ class JobIterator():
 
         @param i Index into the Cartesian product list
         @param obj Arbitrary object (to be modified)
-        @return A string representing the combinations of parameters
+        @return A string representing the combinations of parameters, and the args object
         """
 
         # Fetch the ith combination of parameter values
@@ -75,7 +75,7 @@ class JobIterator():
         for k, v in d.items():
             setattr(obj, k, v)
 
-        return self.get_param_str(i)
+        return obj, self.get_param_str(i)
 
     def get_param_str(self, i):
         """
