@@ -225,7 +225,7 @@ def to_flow(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16):
                                          shuffle=shuffle)
 
 
-def to_dataset(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=2):
+def to_dataset(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=4):
     if df is None:
         return None
 

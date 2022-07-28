@@ -3,6 +3,7 @@ experiment code
 Author: Jay C. Rothenberger (jay.c.rothenberger@ou.edu)
 Contributor: Vincent A. Ferrera (vaflyers@gmail.com)
 """
+import os
 # model-related code I have written (supplied locally)
 from cnn_network import *
 from data_structures import ModelData
@@ -76,16 +77,14 @@ def execute_exp(args, args_str, model, train_dset, val_dset, network_fn, network
     :return: trained keras model encoded as a ModelData instance
     """
 
-    # use the available cpus to set the parallelism level
-    if args.cpus_per_task is not None:
-        tf.config.threading.set_inter_op_parallelism_threads(args.cpus_per_task)
-        tf.config.threading.set_intra_op_parallelism_threads(args.cpus_per_task)
-
     print(args.exp)
 
     fbase = generate_fname(args, args_str)
 
     print(fbase)
+    print(model.summary())
+    tf.keras.utils.plot_model(model, show_shapes=True, show_layer_names=True, expand_nested=True,
+                              to_file=os.curdir + f'/../visualizations/models/model_{str(time())[:6]}.png')
     # Perform the experiment?
     if args.nogo:
         # No!
@@ -96,7 +95,6 @@ def execute_exp(args, args_str, model, train_dset, val_dset, network_fn, network
     #  steps_per_epoch: how many batches from the training set do we use for training in one epoch?
     #  validation_steps=None
     #  means that ALL validation samples will be used (of the selected subset)
-
     history = model.fit(train_dset,
                         epochs=args.epochs,
                         verbose=True,

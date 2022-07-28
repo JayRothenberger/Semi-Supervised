@@ -7,7 +7,7 @@ import experiment
 from job_control import JobIterator
 from make_figure import *
 from data_structures import *
-from cnn_network import build_parallel_functional_model
+from cnn_network import build_parallel_functional_model, build_patchwise_vision_transformer
 from transforms import rand_augment_object
 from data_generator import augment_with_neighbors, get_dataframes_self_train, to_flow, to_dataset
 
@@ -97,22 +97,24 @@ def exp_type_to_hyperparameters(args):
     """
     switch = {
         'full': {
-            'filters': [[24, 32, 64, 128, 256, 256]],
-            'kernels': [[3, 5, 3, 3, 3, 3]],
-            'hidden': [[10, ]],
-            'l1': [1e-4],
-            'l2': [0],
-            'dropout': [0.1],
+            'filters': [[32, 64, 128]],
+            'kernels': [[4, 1, 1]],
+            'hidden': [[4, 4, 4]],
+            'l1': [None],
+            'l2': [None],
+            'dropout': [0],
             'train_iterations': [20],
             'train_fraction': [(i + 1) * .05 for i in range(20)],  # .05, .1, .15, ..., 1.0
-            'epochs': [150],
+            'epochs': [100],
             'augment_batch': [284],
-            'sample': [None],
-            'retrain_fully': [False],  # True, False
-            'distance_function': ['euclidean'],  # 'euclidean', 'confidence'
+            'sample': [.1],
+            'distance_function': ['confidence'],
             'rand_M': [0.1],
             'rand_N': [2],
-            # pseudo_relabel: ['False']
+            'steps_per_epoch': [None],
+            'patience': [16],
+            'batch': [32],
+            'lrate': [1e-4]
         },
         'noreg': {
             'filters': [[24, 32, 64, 128, 256, 256]],
@@ -125,22 +127,24 @@ def exp_type_to_hyperparameters(args):
             'train_fraction': [(i + 1) * .05 for i in range(20)]  # .05, .1, .15, ..., 1.0
         },
         'test': {
-            'filters': [[24, 32, 64, 128, 256, 256]],
-            'kernels': [[3, 5, 3, 3, 3, 3]],
-            'hidden': [[10, ]],
+            'filters': [[32, 64, 128]],
+            'kernels': [[4, 1, 1]],
+            'hidden': [[4, 4, 4]],
             'l1': [None],
             'l2': [None],
             'dropout': [0],
             'train_iterations': [20],
             'train_fraction': [(i + 1) * .05 for i in range(20)],  # .05, .1, .15, ..., 1.0
-            'epochs': [2],
+            'epochs': [100],
             'augment_batch': [284],
             'sample': [.1],
             'distance_function': ['confidence'],
             'rand_M': [0.1],
             'rand_N': [2],
-            'steps_per_epoch': [None],
-            'patience': [2]
+            'steps_per_epoch': [1024],
+            'patience': [10],
+            'batch': [32],
+            'lrate': [1e-4]
         },
         'no_self_train': {
             'filters': [[24, 32, 64, 128, 256, 256]],
@@ -207,10 +211,9 @@ def augment_args(args):
 
 def start_training(args, model, train_dset, val_dset, evaluate_on=None, train_steps=None, val_steps=None):
     # Override arguments if we are using exp_index
-    args, args_str = augment_args(args)
 
-    train_steps = train_steps if train_steps is not None else train_dset.__len__
-    val_steps = val_steps if val_steps is not None else val_dset.__len__
+    train_steps = train_steps if train_steps is not None else 5*train_dset.__len__
+    val_steps = val_steps if val_steps is not None else 5*val_dset.__len__
 
     print(train_steps, val_steps)
 
@@ -226,6 +229,11 @@ def start_training(args, model, train_dset, val_dset, evaluate_on=None, train_st
 
 def prep_gpu(gpu=False, style='a100'):
     """prepare the GPU for tensorflow computation"""
+    # use the available cpus to set the parallelism level
+    if args.cpus_per_task is not None:
+        tf.config.threading.set_inter_op_parallelism_threads(args.cpus_per_task)
+        tf.config.threading.set_intra_op_parallelism_threads(args.cpus_per_task)
+
     # Turn off GPU?
     if not gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -246,8 +254,7 @@ def prep_gpu(gpu=False, style='a100'):
 
 
 def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, augment_fn=None, evaluate_on=None):
-    args, args_str = augment_args(args)
-
+    print('args', args)
     import distances
     dist_func_selector = {
         'euclidean': distances.euclidean,
@@ -269,7 +276,7 @@ def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, 
 
         model_data = start_training(args,
                                     model,
-                                    to_dataset(train_df, train_image_gen),
+                                    to_dataset(train_df, train_image_gen, shuffle=True),
                                     to_dataset(val_df, default_image_gen),
                                     train_steps=args.steps_per_epoch,
                                     evaluate_on={'val': to_flow(val_df, default_image_gen),
@@ -317,6 +324,7 @@ if __name__ == '__main__':
     # Parse and check incoming arguments
     parser = create_parser()
     args = parser.parse_args()
+    args, args_str = augment_args(args)
 
     prep_gpu(args.gpu)
 
@@ -330,24 +338,25 @@ if __name__ == '__main__':
         train_fraction=args.train_fraction)
 
     utility = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1. / 255,
-                                                              preprocessing_function=rand_augment_object(.5, 2,
+                                                              preprocessing_function=rand_augment_object(.1, 2,
                                                                                                          leq_M=False))
     network_params = {'learning_rate': args.lrate,
                       'conv_filters': args.filters,
                       'conv_size': args.kernels,
-                      'dense_layers': args.hidden,
+                      'attention_heads': args.hidden,
                       'image_size': (image_size[0], image_size[1], 3),
                       'n_classes': 3,
                       'l1': args.l1,
                       'l2': args.l2,
                       'dropout': args.dropout}
 
-    network_fn = build_parallel_functional_model
+    print('hidden', args.hidden)
+    network_fn = build_patchwise_vision_transformer
 
-    # self_train(args, network_fn, network_params, train_df, val_df, withheld_df, augment_fn=None, evaluate_on=None)
+    self_train(args, network_fn, network_params, train_df, val_df, withheld_df,
+               augment_fn=rand_augment_object(.1, 2, leq_M=False),
+               evaluate_on=None)
 
     val_dset = to_dataset(val_df, utility)
     explore_image_dataset(val_dset, 10)
 
-    # tf.keras.utils.plot_model(model, show_shapes=True, show_layer_names=True, expand_nested=True,
-    #                          to_file=CURRDIR + '/../visualizations/model.png')
