@@ -225,7 +225,7 @@ def to_flow(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16):
                                          shuffle=shuffle)
 
 
-def to_dataset(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=4):
+def to_dataset(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=4, seed=42):
     if df is None:
         return None
 
@@ -236,7 +236,8 @@ def to_dataset(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=1
                                         color_mode='rgb',
                                         class_mode='sparse',
                                         batch_size=batch_size,
-                                        shuffle=shuffle)
+                                        shuffle=shuffle,
+                                        seed=seed)
 
     dset = tf.data.Dataset.from_generator(lambda: gen, output_types=(tf.float32, tf.int32),
                                           output_shapes=([None, 256, 256, 3], [None, ])).prefetch(prefetch)
@@ -410,10 +411,10 @@ def get_image_dsets(data_paths, path_prefix, image_size=(256, 256), batch_size=1
     # the path string to the data directory relative to this file
     data_paths = [path_prefix + f for f in data_paths]
 
-    train, withheld, val, test, image_gen = prepare_dset(data_paths,
-                                                         image_size=image_size,
-                                                         batch_size=batch_size,
-                                                         train_fraction=train_fraction)
+    train, withheld, val, test, image_gen = get_dataframes_self_train(data_paths,
+                                                                      image_size=image_size,
+                                                                      batch_size=batch_size,
+                                                                      train_fraction=train_fraction)
 
     augment_args = augment_args if isinstance(augment_args, dict) else dict()
 

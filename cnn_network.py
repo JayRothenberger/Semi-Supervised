@@ -46,8 +46,6 @@ def build_patchwise_vision_transformer(conv_filters,
         x = Conv2D(filters=filters, kernel_size=(kernel, kernel), strides=(kernel, kernel), activation=activation,
                    **conv_params)(x)
 
-    x = SpatialDropout2D(dropout)(x)
-    print(attention_heads)
     for i, heads in enumerate(attention_heads):
         # for all layers except the last one, we return sequences
         key_dim = value_dim = x.shape[1]

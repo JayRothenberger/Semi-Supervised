@@ -3,12 +3,14 @@ import matplotlib.pyplot as plt
 import gc
 from time import time
 # code supplied locally
+import numpy as np
+
 import experiment
 from job_control import JobIterator
 from make_figure import *
 from data_structures import *
 from cnn_network import build_parallel_functional_model, build_patchwise_vision_transformer
-from transforms import rand_augment_object
+from transforms import rand_augment_object, custom_rand_augment_object
 from data_generator import augment_with_neighbors, get_dataframes_self_train, to_flow, to_dataset
 
 CURRDIR = os.path.dirname(__file__)
@@ -97,11 +99,11 @@ def exp_type_to_hyperparameters(args):
     """
     switch = {
         'full': {
-            'filters': [[32, 64, 128]],
-            'kernels': [[4, 1, 1]],
-            'hidden': [[4, 4, 4]],
+            'filters': [[32, 64, 128, 128]],
+            'kernels': [[4, 2, 1, 1]],
+            'hidden': [[4, 4, 4, 4]],
             'l1': [None],
-            'l2': [None],
+            'l2': [1e-4],
             'dropout': [0],
             'train_iterations': [20],
             'train_fraction': [(i + 1) * .05 for i in range(20)],  # .05, .1, .15, ..., 1.0
@@ -129,10 +131,10 @@ def exp_type_to_hyperparameters(args):
         'test': {
             'filters': [[32, 64, 128]],
             'kernels': [[4, 1, 1]],
-            'hidden': [[4, 4, 4]],
+            'hidden': [[3, 3, 3]],
             'l1': [None],
-            'l2': [None],
-            'dropout': [0],
+            'l2': [1e-4],
+            'dropout': [0.1],
             'train_iterations': [20],
             'train_fraction': [(i + 1) * .05 for i in range(20)],  # .05, .1, .15, ..., 1.0
             'epochs': [100],
@@ -140,9 +142,9 @@ def exp_type_to_hyperparameters(args):
             'sample': [.1],
             'distance_function': ['confidence'],
             'rand_M': [0.1],
-            'rand_N': [2],
-            'steps_per_epoch': [1024],
-            'patience': [10],
+            'rand_N': [3],
+            'steps_per_epoch': [None],
+            'patience': [16],
             'batch': [32],
             'lrate': [1e-4]
         },
@@ -212,8 +214,8 @@ def augment_args(args):
 def start_training(args, model, train_dset, val_dset, evaluate_on=None, train_steps=None, val_steps=None):
     # Override arguments if we are using exp_index
 
-    train_steps = train_steps if train_steps is not None else 5*train_dset.__len__
-    val_steps = val_steps if val_steps is not None else 5*val_dset.__len__
+    train_steps = train_steps if train_steps is not None else 5 * train_dset.__len__
+    val_steps = val_steps if val_steps is not None else 5 * val_dset.__len__
 
     print(train_steps, val_steps)
 
@@ -317,6 +319,145 @@ def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, 
         print('retraining: ', train_iteration)
 
 
+def explore_lense_channels(dset, num_images, model_path='/../results/test.network', display=False):
+    """display num_images from dset"""
+    from PIL import Image
+    # for each image
+    for i in range(num_images):
+        imgs = None
+        # take candidate image
+        ex = dset.take(1)
+        # separate image and label
+        for x, y in ex:
+            imgs = [i for i in x]
+
+        to_show = Image.fromarray(np.uint8(imgs[0] * 255))
+        with open(CURRDIR + f'/../visualizations/input{i}.png', 'wb') as fp:
+            # save
+            to_show.save(fp)
+        if display:
+            # display
+            to_show.show()
+        # transform candidate using only the lense block layers
+        # get the model data
+        with open(CURRDIR + model_path, 'rb') as fp:
+            model = pickle.load(fp)
+        # get the model
+        model = model.get_model()
+
+        new_output = None
+        for layer in model.layers:
+            try:
+                if layer.strides != 1 and layer.strides != (1, 1):
+                    break
+            except:
+                pass
+            new_output = layer
+        # create a new model with the lense outputs as the outputs
+        model = tf.keras.models.Model(inputs=[model.layers[0].input], outputs=[new_output.output])
+        opt = tf.keras.optimizers.Nadam(learning_rate=1e-4,
+                                        beta_1=0.9, beta_2=0.999,
+                                        epsilon=None, decay=0.99)
+
+        model.compile(loss='sparse_categorical_crossentropy',
+                      optimizer=opt,
+                      metrics=['sparse_categorical_accuracy'])
+        # get the lense layer outputs for the first image
+        volume = model.predict(ex)
+        volume = volume[0, ::]
+        import math
+        # construct the compound image
+        per_row = math.ceil(math.sqrt(volume.shape[-1] + imgs[0].shape[-1]))
+        square_size = volume.shape[0]
+        arr = np.zeros((per_row * square_size, (((volume.shape[-1] + imgs[0].shape[-1]) // per_row) + 1) * square_size),
+                       np.uint8)
+        try:
+            for j in range(imgs[0].shape[-1]):
+                arr[(j % per_row) * square_size:(j + 1 % per_row) * square_size,
+                (j // per_row) * square_size:((j // per_row) + 1) * square_size] = np.uint8(
+                    (imgs[0][:, :, j] / np.max(imgs[0][:, :, j])) * 255)
+            for j in range(volume.shape[-1]):
+                volume[:, :, j] += -1 * min(0, np.min(volume[:, :, j]))
+            for j in range(imgs[0].shape[-1], volume.shape[-1] + imgs[0].shape[-1]):
+                x = (j % per_row) * square_size
+                y = (j // per_row) * square_size
+                arr[x:x + square_size, y:y + square_size] = np.uint8(
+                    (volume[:, :, j - imgs[0].shape[-1]] / np.max(volume[:, :, j - imgs[0].shape[-1]])) * 255)
+        except IndexError as v:
+            to_show = Image.fromarray(arr)
+            if display:
+                to_show.show()
+            print(j, per_row)
+            raise v
+        to_show = Image.fromarray(arr)
+        if display:
+            # display the compound image
+            to_show.show()
+        with open(CURRDIR + f'/../visualizations/lense_output{i}.png', 'wb') as fp:
+            # save it
+            to_show.save(fp)
+
+
+def mult_along_axis(A, B, axis=0):
+    """
+    multiply 1D array B along an axis of A
+
+    :param A: array along which B will be multiplied
+    :param B: 1D array of weights
+    :param axis: axis along which B will be multiplied
+    :return: the tensor A weighted along some axis by the vector B
+    """
+    A = np.array(A)
+    B = np.array(B)
+
+    # shape check
+    if axis >= A.ndim:
+        raise ValueError("Bad Shape")
+    if A.shape[axis] != B.size:
+        raise ValueError("Length of 'A' along the given axis must be the same as B.size")
+    # convert the arrays to be broadcastable to the desired shape
+    shape = np.swapaxes(A, A.ndim-1, axis).shape
+    B_brc = np.broadcast_to(B, shape)
+    B_brc = np.swapaxes(B_brc, A.ndim-1, axis)
+
+    return A * B_brc
+
+
+def blended_dset(train_df, image_gen, batch_size=16, n_blended=2, image_size=(256, 256, 3), prefetch=4):
+    # what if we take elements in our dataset and blend them together and predict the mean label?
+    # need two train sets to blend together
+
+    datasets = []  # this array will hold all of the datasets we spawn to take batches from to mix together
+    for i in range(n_blended):
+        datasets.append(to_dataset(train_df, image_gen, True, batch_size=batch_size, seed=i))
+
+    # create a generator which will be turned into the new Dataset object
+    def arg_free_gen():
+        def random_weighting(n):
+            # get a random weighting chosen uniformly from the convex hull of the unit vectors.
+            samp = -1 * np.log(np.random.uniform(0, 1, n))
+            samp /= np.sum(samp)
+            return np.array(samp)
+        # the generator yields batches blended together with this weighting
+        while True:
+            # get a batch from each generator
+            batches = [dataset.take(1) for dataset in datasets]
+            # split the batches into x and y
+            imgs = [[np.stack([i for i in x]) for x, y in batch] for batch in batches]
+            labs = [[np.stack([i for i in y]) for x, y in batch] for batch in batches]
+            # generate the random weighting
+            weights = random_weighting(len(labs))
+            m = len(weights)
+            imgs, labs = m * mult_along_axis(imgs, weights, 0), m * mult_along_axis(labs, weights, 0)
+            # return the convex combination point
+            yield np.squeeze(np.mean(np.stack(imgs), axis=0), axis=0), np.squeeze(np.mean(np.stack(labs), axis=0),
+                                                                                  axis=0)
+    # return the dataset object of the generator
+    return tf.data.Dataset.from_generator(arg_free_gen,
+                                          output_types=(tf.float32, tf.int32),
+                                          output_shapes=([None, *image_size], [None, ])).prefetch(prefetch)
+
+
 if __name__ == '__main__':
     from data_generator import get_image_dsets
 
@@ -338,8 +479,8 @@ if __name__ == '__main__':
         train_fraction=args.train_fraction)
 
     utility = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1. / 255,
-                                                              preprocessing_function=rand_augment_object(.1, 2,
-                                                                                                         leq_M=False))
+                                                              preprocessing_function=custom_rand_augment_object(.1, 2,
+                                                                                                                leq_M=False))
     network_params = {'learning_rate': args.lrate,
                       'conv_filters': args.filters,
                       'conv_size': args.kernels,
@@ -352,11 +493,19 @@ if __name__ == '__main__':
 
     print('hidden', args.hidden)
     network_fn = build_patchwise_vision_transformer
-
+    """
     self_train(args, network_fn, network_params, train_df, val_df, withheld_df,
-               augment_fn=rand_augment_object(.1, 2, leq_M=False),
+               augment_fn=custom_rand_augment_object(.1, 2, leq_M=False),
                evaluate_on=None)
+    """
+    val_dset = to_dataset(val_df, ig)
+    train_dset = blended_dset(train_df, ig, args.batch, 2)
 
-    val_dset = to_dataset(val_df, utility)
-    explore_image_dataset(val_dset, 10)
+    explore_image_dataset(train_dset, 10)
 
+    model = network_fn(**network_params)
+    # start_training(args, model, train_dset, val_dset)
+
+    # explore_image_dataset(val_dset, 10)
+
+    # explore_lense_channels(val_dset, 16, display=False)

@@ -381,7 +381,7 @@ def sharpness(image, factor):
     result = tf.where(tf.equal(padded_mask, 1), padded_degenerate, orig_image)
 
     # Blend the final result.
-    return tf.cast(blend(result, orig_image, 1-factor), tf.float32)
+    return tf.cast(blend(result, orig_image, 1 - factor), tf.float32)
 
 
 def equalize(image: tf.Tensor, magnitude=None) -> tf.Tensor:
@@ -481,7 +481,26 @@ def rand_augment_object(M, N, leq_M=False):
     return rand_augment
 
 
-# bad = [equalize, posterize, contrast]
-# fixed: sharpness, equalize, autocontrast
-transforms = [identity, autocontrast, equalize, rotate, solarize, color, posterize, contrast, brightness,
-              sharpness, shear_x, shear_y, translate_x, translate_y]
+def custom_rand_augment_object(M, N, leq_M=False):
+    """
+    :param M: global magnitude parameter over all transformations (1 is max, 0 is min)
+    :param N: number of transformations to apply
+    :param leq_M: perform transformations less than or equal to M
+    :return: a callable that will randomly augment a single image (a function from image space to image space)
+    """
+
+    def rand_augment(img):
+        """
+        performs random augmentation with magnitude M for N iterations
+
+        :param img: image to augment
+        :return: augmented image
+        """
+        transforms = [identity, autocontrast, equalize, rotate, color, contrast, brightness,
+                      sharpness, shear_x, shear_y, translate_x, translate_y]
+        # needs to take a rank 3 numpy tensor, and return a tensor of the same rank
+        for op in np.random.choice(transforms, N):
+            img = op(img, np.random.uniform(0, M)) if leq_M else op(img, M)
+        return img
+
+    return rand_augment
