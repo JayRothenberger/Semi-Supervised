@@ -225,26 +225,53 @@ def to_flow(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16):
                                          shuffle=shuffle)
 
 
-def to_dataset(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=4, seed=42):
+def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=4, seed=42,
+               class_mode='sparse'):
     if df is None:
         return None
 
-    gen = image_gen.flow_from_dataframe(df,
-                                        x_col='filepath',
-                                        y_col='class',
-                                        target_size=image_size,
-                                        color_mode='rgb',
-                                        class_mode='sparse',
-                                        batch_size=batch_size,
-                                        shuffle=shuffle,
-                                        seed=seed)
+    def preprocess_image(item, target_shape):
+        """
+        Load in image from filename and resize to target shape.
+        """
 
-    dset = tf.data.Dataset.from_generator(lambda: gen, output_types=(tf.float32, tf.int32),
-                                          output_shapes=([None, 256, 256, 3], [None, ])).prefetch(prefetch)
+        filename, label = item[0], item[1]
 
-    dset.__len__ = len(gen)
+        image_bytes = tf.io.read_file(filename)
+        image = tf.io.decode_image(image_bytes)  # this line does not work kinda
+        image = tf.image.convert_image_dtype(image, tf.float32)
+        image = tf.image.resize(image, target_shape)
 
-    return dset
+        if class_mode == 'categorical':
+            label = tf.one_hot(tf.strings.to_number(label, tf.dtypes.int32), 3, dtype=tf.uint8)
+        elif class_mode == 'sparse':
+            label = tf.strings.to_number(label, tf.dtypes.uint8)
+        else:
+            raise ValueError('improper class mode')
+
+        return image, label
+
+    df['class'] = df['class'].astype(str)
+    slices = df.to_numpy()
+
+    # variable size element makes this impossible to convert to tensor???
+    if shuffle:
+        return tf.data.Dataset.from_tensor_slices(
+            slices
+        ).repeat().shuffle(len(slices), seed, True).map(lambda x:
+                                                        tf.py_function(func=preprocess_image,
+                                                                       inp=[x, image_size],
+                                                                       Tout=(tf.float32, tf.uint8)),
+                                                        num_parallel_calls=tf.data.AUTOTUNE).batch(
+            batch_size).prefetch(prefetch)
+    else:
+        return tf.data.Dataset.from_tensor_slices(
+            slices
+        ).repeat().map(lambda x:
+                       tf.py_function(func=preprocess_image,
+                                      inp=[x, image_size],
+                                      Tout=(tf.float32, tf.uint8)),
+                       num_parallel_calls=tf.data.AUTOTUNE).batch(batch_size).prefetch(prefetch)
 
 
 def get_dataframes_self_train(train_dirlist, val_dirlist=None, train_fraction=.05):

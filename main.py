@@ -1,10 +1,18 @@
+"""
+Experiment Management Code by Jay Rothenberger (jay.c.rothenberger@ou.edu)
+"""
+
 # code supplied by pip / conda
+import os
+
 import matplotlib.pyplot as plt
 import gc
 from time import time
-# code supplied locally
 import numpy as np
+import imgaug as ia
+from imgaug import augmenters as iaa
 
+# code supplied locally
 import experiment
 from job_control import JobIterator
 from make_figure import *
@@ -12,8 +20,6 @@ from data_structures import *
 from cnn_network import build_parallel_functional_model, build_patchwise_vision_transformer
 from transforms import rand_augment_object, custom_rand_augment_object
 from data_generator import augment_with_neighbors, get_dataframes_self_train, to_flow, to_dataset
-
-CURRDIR = os.path.dirname(__file__)
 
 
 def create_parser():
@@ -26,6 +32,7 @@ def create_parser():
     # High-level commands
     parser.add_argument('--check', action='store_true', help='Check results for completeness')
     parser.add_argument('--nogo', action='store_true', help='Do not perform the experiment')
+    parser.add_argument('--peek', action='store_true', help='Display images from dataset instead of training')
     parser.add_argument('--verbose', '-v', action='count', default=0, help="Verbosity level")
 
     # CPU/GPU
@@ -35,7 +42,7 @@ def create_parser():
     # High-level experiment configuration
     parser.add_argument('--label', type=str, default="", help="Experiment label")
     parser.add_argument('--exp_type', type=str, default='test', help="Experiment type")
-    parser.add_argument('--results_path', type=str, default=CURRDIR + '/../results', help='Results directory')
+    parser.add_argument('--results_path', type=str, default=os.curdir + '/../results', help='Results directory')
 
     # Semi-supervised parameters
     parser.add_argument('--train_fraction', type=float, default=0.05, help="fraction of available training data to use")
@@ -56,8 +63,15 @@ def create_parser():
     parser.add_argument('--closest_to_labeled', action='store_true',
                         help='compute nearest neighbors only to the labeled set')
     # Data augmentation parameters
+    parser.add_argument('--randAugment', action='store_true', help='Use rand augment data augmentation')
+    parser.add_argument('--convexAugment', action='store_true', help='Use convex data augmentation')
+
     parser.add_argument('--rand_M', type=float, default=0, help='magnitude parameter for rand augment')
     parser.add_argument('--rand_N', type=int, default=0, help='iterations parameter for rand augment')
+
+    parser.add_argument('--convex_dim', type=int, default=1, help='number of examples to combine for the convex batch')
+    parser.add_argument('--convex_prob', type=float, default=0, help='probability of encountering a convex augment'
+                                                                     ' batch during a train step')
 
     # Specific experiment configuration
     parser.add_argument('--exp', type=int, default=0, help='Experiment index')
@@ -118,56 +132,26 @@ def exp_type_to_hyperparameters(args):
             'batch': [32],
             'lrate': [1e-4]
         },
-        'noreg': {
-            'filters': [[24, 32, 64, 128, 256, 256]],
-            'kernels': [[3, 5, 3, 3, 3, 3]],
-            'hidden': [[10, ]],
+        'test': {
+            'filters': [[36, 64]],
+            'kernels': [[4, 1]],
+            'hidden': [[3, 3]],
             'l1': [None],
             'l2': [None],
-            'dropout': [0],
-            'train_iterations': [5],
-            'train_fraction': [(i + 1) * .05 for i in range(20)]  # .05, .1, .15, ..., 1.0
-        },
-        'test': {
-            'filters': [[32, 64, 128]],
-            'kernels': [[4, 1, 1]],
-            'hidden': [[3, 3, 3]],
-            'l1': [None],
-            'l2': [1e-4],
             'dropout': [0.1],
             'train_iterations': [20],
-            'train_fraction': [(i + 1) * .05 for i in range(20)],  # .05, .1, .15, ..., 1.0
-            'epochs': [100],
-            'augment_batch': [284],
-            'sample': [.1],
-            'distance_function': ['confidence'],
-            'rand_M': [0.1],
-            'rand_N': [3],
-            'steps_per_epoch': [None],
-            'patience': [16],
-            'batch': [32],
-            'lrate': [1e-4]
+            'train_fraction': [1],
+            'epochs': [512],
+            'convex_dim': [[2, 3]],
+            'convex_prob': [[.1, .25, .5, .75]],
+            'steps_per_epoch': [512],
+            'patience': [32],
+            'batch': [16],
+            'lrate': [1e-4],
+            'randAugment': [False],
+            'peek': [False],
+            'convexAugment': [True]
         },
-        'no_self_train': {
-            'filters': [[24, 32, 64, 128, 256, 256]],
-            'kernels': [[3, 5, 3, 3, 3, 3]],
-            'hidden': [[10, ]],
-            'l1': [1e-4],
-            'l2': [None],
-            'dropout': [0.1],
-            'train_iterations': [1],
-            'train_fraction': [(i + 1) * .05 for i in range(20)],  # .05, .1, .15, ..., 1.0
-        },
-        'basic_SL': {
-            'filters': [[24, 32, 64, 128, 256, 256]],
-            'kernels': [[3, 5, 3, 3, 3, 3]],
-            'hidden': [[10, ]],
-            'l1': [0, 1e-4],
-            'l2': [0, 1e-4],
-            'dropout': [0, 0.05, 0.1, 0.15],
-            'train_iterations': [1],
-            'train_fraction': [1.0],
-        }
     }
 
     rax = switch.get(args.exp_type)
@@ -214,8 +198,8 @@ def augment_args(args):
 def start_training(args, model, train_dset, val_dset, evaluate_on=None, train_steps=None, val_steps=None):
     # Override arguments if we are using exp_index
 
-    train_steps = train_steps if train_steps is not None else 5 * train_dset.__len__
-    val_steps = val_steps if val_steps is not None else 5 * val_dset.__len__
+    train_steps = train_steps if train_steps is not None else 100
+    val_steps = val_steps if val_steps is not None else 100
 
     print(train_steps, val_steps)
 
@@ -231,6 +215,8 @@ def start_training(args, model, train_dset, val_dset, evaluate_on=None, train_st
 
 def prep_gpu(gpu=False, style='a100'):
     """prepare the GPU for tensorflow computation"""
+    # tell tensorflow to be quiet
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
     # use the available cpus to set the parallelism level
     if args.cpus_per_task is not None:
         tf.config.threading.set_inter_op_parallelism_threads(args.cpus_per_task)
@@ -264,9 +250,6 @@ def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, 
         'confidence': distances.confidence
     }
 
-    train_image_gen = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1. / 255,
-                                                                      preprocessing_function=augment_fn)
-
     default_image_gen = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1. / 255)
 
     model = None
@@ -278,8 +261,8 @@ def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, 
 
         model_data = start_training(args,
                                     model,
-                                    to_dataset(train_df, train_image_gen, shuffle=True),
-                                    to_dataset(val_df, default_image_gen),
+                                    to_dataset(train_df, shuffle=True),
+                                    to_dataset(val_df),
                                     train_steps=args.steps_per_epoch,
                                     evaluate_on={'val': to_flow(val_df, default_image_gen),
                                                  'withheld': to_flow(withheld_df, default_image_gen),
@@ -319,20 +302,19 @@ def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, 
         print('retraining: ', train_iteration)
 
 
-def explore_lense_channels(dset, num_images, model_path='/../results/test.network', display=False):
+def explore_lense_channels(dset, num_images, model_path='/../results/vit_model_95', display=False):
     """display num_images from dset"""
     from PIL import Image
     # for each image
     for i in range(num_images):
         imgs = None
         # take candidate image
-        ex = dset.take(1)
         # separate image and label
-        for x, y in ex:
-            imgs = [i for i in x]
+        for x, y in dset.take(1):
+            imgs = [x]
 
-        to_show = Image.fromarray(np.uint8(imgs[0] * 255))
-        with open(CURRDIR + f'/../visualizations/input{i}.png', 'wb') as fp:
+        to_show = Image.fromarray(np.uint8(imgs[0][0] * 255))
+        with open(os.curdir + f'/../visualizations/input{i}.png', 'wb') as fp:
             # save
             to_show.save(fp)
         if display:
@@ -340,7 +322,7 @@ def explore_lense_channels(dset, num_images, model_path='/../results/test.networ
             to_show.show()
         # transform candidate using only the lense block layers
         # get the model data
-        with open(CURRDIR + model_path, 'rb') as fp:
+        with open(os.curdir + model_path, 'rb') as fp:
             model = pickle.load(fp)
         # get the model
         model = model.get_model()
@@ -362,20 +344,21 @@ def explore_lense_channels(dset, num_images, model_path='/../results/test.networ
         model.compile(loss='sparse_categorical_crossentropy',
                       optimizer=opt,
                       metrics=['sparse_categorical_accuracy'])
+
         # get the lense layer outputs for the first image
-        volume = model.predict(ex)
-        volume = volume[0, ::]
+        volume = model.predict(np.array([imgs[0][0][:, :, :3], ]))[0]
+
         import math
         # construct the compound image
         per_row = math.ceil(math.sqrt(volume.shape[-1] + imgs[0].shape[-1]))
-        square_size = volume.shape[0]
+        square_size = imgs[0][0].shape[0]
         arr = np.zeros((per_row * square_size, (((volume.shape[-1] + imgs[0].shape[-1]) // per_row) + 1) * square_size),
                        np.uint8)
         try:
             for j in range(imgs[0].shape[-1]):
                 arr[(j % per_row) * square_size:(j + 1 % per_row) * square_size,
                 (j // per_row) * square_size:((j // per_row) + 1) * square_size] = np.uint8(
-                    (imgs[0][:, :, j] / np.max(imgs[0][:, :, j])) * 255)
+                    (imgs[0][0][:, :, j] / np.max(imgs[0][0][:, :, j])) * 255)
             for j in range(volume.shape[-1]):
                 volume[:, :, j] += -1 * min(0, np.min(volume[:, :, j]))
             for j in range(imgs[0].shape[-1], volume.shape[-1] + imgs[0].shape[-1]):
@@ -393,69 +376,156 @@ def explore_lense_channels(dset, num_images, model_path='/../results/test.networ
         if display:
             # display the compound image
             to_show.show()
-        with open(CURRDIR + f'/../visualizations/lense_output{i}.png', 'wb') as fp:
+        with open(os.curdir + f'/../visualizations/lense_output{i}.png', 'wb') as fp:
             # save it
             to_show.save(fp)
 
 
-def mult_along_axis(A, B, axis=0):
-    """
-    multiply 1D array B along an axis of A
-
-    :param A: array along which B will be multiplied
-    :param B: 1D array of weights
-    :param axis: axis along which B will be multiplied
-    :return: the tensor A weighted along some axis by the vector B
-    """
-    A = np.array(A)
-    B = np.array(B)
-
-    # shape check
-    if axis >= A.ndim:
-        raise ValueError("Bad Shape")
-    if A.shape[axis] != B.size:
-        raise ValueError("Length of 'A' along the given axis must be the same as B.size")
-    # convert the arrays to be broadcastable to the desired shape
-    shape = np.swapaxes(A, A.ndim-1, axis).shape
-    B_brc = np.broadcast_to(B, shape)
-    B_brc = np.swapaxes(B_brc, A.ndim-1, axis)
-
-    return A * B_brc
-
-
-def blended_dset(train_df, image_gen, batch_size=16, n_blended=2, image_size=(256, 256, 3), prefetch=4):
+def blended_dset(train_df, batch_size=16, n_blended=2, image_size=(256, 256, 3), prefetch=4, prob=None):
     # what if we take elements in our dataset and blend them together and predict the mean label?
     # need two train sets to blend together
 
-    datasets = []  # this array will hold all of the datasets we spawn to take batches from to mix together
-    for i in range(n_blended):
-        datasets.append(to_dataset(train_df, image_gen, True, batch_size=batch_size, seed=i))
+    prob = prob if prob is not None else 1
 
-    # create a generator which will be turned into the new Dataset object
     def arg_free_gen():
+        # create a generator which will be turned into the new Dataset object
+        dataset = to_dataset(train_df, shuffle=True, batch_size=batch_size, seed=42, prefetch=prefetch,
+                             class_mode='categorical').window(n_blended).prefetch(prefetch)
+
         def random_weighting(n):
             # get a random weighting chosen uniformly from the convex hull of the unit vectors.
             samp = -1 * np.log(np.random.uniform(0, 1, n))
             samp /= np.sum(samp)
             return np.array(samp)
+
         # the generator yields batches blended together with this weighting
-        while True:
-            # get a batch from each generator
-            batches = [dataset.take(1) for dataset in datasets]
-            # split the batches into x and y
-            imgs = [[np.stack([i for i in x]) for x, y in batch] for batch in batches]
-            labs = [[np.stack([i for i in y]) for x, y in batch] for batch in batches]
-            # generate the random weighting
-            weights = random_weighting(len(labs))
-            m = len(weights)
-            imgs, labs = m * mult_along_axis(imgs, weights, 0), m * mult_along_axis(labs, weights, 0)
-            # return the convex combination point
-            yield np.squeeze(np.mean(np.stack(imgs), axis=0), axis=0), np.squeeze(np.mean(np.stack(labs), axis=0),
-                                                                                  axis=0)
+        for window in dataset:
+            x, y = window
+
+            if np.random.uniform(0, 1, 1) > prob:
+                yield np.array([ex for ex in x][0]), np.array([ex for ex in y][0]).astype(np.float32)
+                continue
+            # compute the weights for the combination
+            weights = random_weighting(n_blended)
+            # yield the convex combination
+            try:
+                yield tf.reduce_sum(np.array([weight * ex for ex, weight in zip(x, weights)]), axis=0), \
+                      tf.reduce_sum(np.array([weight * tf.cast(ex, tf.float32) for ex, weight in zip(y, weights)]),
+                                    axis=0)
+                continue
+            except ValueError as e:
+                # sometimes (infrequently) our batches differ in size and cannot be stacked or meaned, we just need
+                # to retry
+                print(e)
+                continue
+
     # return the dataset object of the generator
     return tf.data.Dataset.from_generator(arg_free_gen,
-                                          output_types=(tf.float32, tf.int32),
-                                          output_shapes=([None, *image_size], [None, ])).prefetch(prefetch)
+                                          output_types=(tf.float32, tf.float32),
+                                          output_shapes=([None, *image_size], [None, 3]))
+
+
+def fix_image_df(df):
+    from PIL import Image
+
+    def verify_jpeg_image(file_path):
+        try:
+            img = Image.open(file_path)
+            img0 = img.getdata()[0]
+            img.save(file_path)
+            return bool(img0) or True
+        except OSError:
+            return False
+
+    bads = 0
+    goods = 0
+
+    for index, row in df():
+        img = row['filepath']
+        if verify_jpeg_image(img):
+            goods += 1
+        else:
+            bads += 1
+
+    print('bads:', bads, 'goods', goods)
+
+
+def fix_image_dir(directory):
+    from PIL import Image
+
+    file_list = []
+
+    for path, directories, files in os.walk(directory):
+        for file in files:
+            file_list.append(os.path.join(path, file))
+
+    def verify_jpeg_image(file_path):
+        try:
+            img = Image.open(file_path)
+            img0 = img.getdata()[0]
+            img.save(file_path)
+            return bool(img0) and True
+        except OSError:
+            return False
+
+    bads = 0
+    goods = 0
+
+    for path in file_list:
+        if verify_jpeg_image(path):
+            goods += 1
+        else:
+            bads += 1
+            print(path)
+
+    print('bads:', bads, 'goods', goods)
+
+
+def generate_fname(args):
+    """
+    Generate the base file name for output files/directories.
+
+    The approach is to encode the key experimental parameters in the file name.  This
+    way, they are unique and easy to identify after the fact.
+
+    :param args: from argParse
+    :params_str: String generated by the JobIterator
+    :return: a string (file name prefix)
+    """
+    # network parameters
+    hidden_str = '_'.join([str(i) for i in args.hidden])
+    filters_str = '_'.join([str(i) for i in args.filters])
+    kernels_str = '_'.join([str(i) for i in args.kernels])
+
+    # Label
+    if args.label is None:
+        label_str = ""
+    else:
+        label_str = "%s_" % args.label
+
+    # Experiment type
+    if args.exp_type is None:
+        experiment_type_str = ""
+    else:
+        experiment_type_str = "%s_" % args.exp_type
+
+    # experiment index
+    num_str = str(args.exp)
+
+    # learning rate
+    lrate_str = "LR_%0.6f_" % args.lrate
+
+    return "%s/%s_%s_filt_%s_ker_%s_hidden_%s_l1_%s_l2_%s_drop_%s_frac_%s" % (
+        args.results_path,
+        experiment_type_str,
+        num_str,
+        filters_str,
+        kernels_str,
+        hidden_str,
+        str(args.l1),
+        str(args.l2),
+        str(args.dropout),
+        str(args.train_fraction))
 
 
 if __name__ == '__main__':
@@ -472,15 +542,13 @@ if __name__ == '__main__':
     paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
              'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
              'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
+
     print('getting dsets...')
 
     train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
-        [CURRDIR + '/../data/' + path for path in paths],
+        [os.curdir + '/../data/' + path for path in paths],
         train_fraction=args.train_fraction)
 
-    utility = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1. / 255,
-                                                              preprocessing_function=custom_rand_augment_object(.1, 2,
-                                                                                                                leq_M=False))
     network_params = {'learning_rate': args.lrate,
                       'conv_filters': args.filters,
                       'conv_size': args.kernels,
@@ -489,7 +557,8 @@ if __name__ == '__main__':
                       'n_classes': 3,
                       'l1': args.l1,
                       'l2': args.l2,
-                      'dropout': args.dropout}
+                      'dropout': args.dropout,
+                      'loss': 'categorical_crossentropy'}
 
     print('hidden', args.hidden)
     network_fn = build_patchwise_vision_transformer
@@ -498,14 +567,36 @@ if __name__ == '__main__':
                augment_fn=custom_rand_augment_object(.1, 2, leq_M=False),
                evaluate_on=None)
     """
-    val_dset = to_dataset(val_df, ig)
-    train_dset = blended_dset(train_df, ig, args.batch, 2)
-
-    explore_image_dataset(train_dset, 10)
+    class_mode = network_params['loss'].split('_')[0]
+    val_dset = to_dataset(val_df, shuffle=True, batch_size=args.batch, class_mode=class_mode)
+    # define our randAugment object
+    rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
+    # data augmentation strategy selection
+    if args.convexAugment and args.randAugment:
+        train_dset = blended_dset(train_df, args.batch, 2, prob=.25) \
+            .map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                 num_parallel_calls=tf.data.AUTOTUNE, )
+    elif args.convexAugment:
+        train_dset = blended_dset(train_df, args.batch, 2, prob=.25)
+    elif args.randAugment:
+        train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, class_mode=class_mode) \
+            .map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                 num_parallel_calls=tf.data.AUTOTUNE, )
+    else:
+        train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, class_mode=class_mode)
+    # peek at the dataset instead of training
+    if args.peek:
+        explore_image_dataset(train_dset, 32)
+        exit(-1)
 
     model = network_fn(**network_params)
-    # start_training(args, model, train_dset, val_dset)
+    model_data = start_training(args, model, train_dset, val_dset, train_steps=args.steps_per_epoch,
+                                val_steps=len(val_df) // args.batch)
 
-    # explore_image_dataset(val_dset, 10)
-
-    # explore_lense_channels(val_dset, 16, display=False)
+    try:
+        with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+    except Exception as e:
+        print(e)
+        with open(f'./vit_model{time()}', 'wb') as fp:
+            pickle.dump(model_data, fp)

@@ -255,10 +255,15 @@ def explore_image_dataset(dset, num_images):
     """display num_images from dset"""
     from PIL import Image
 
-    for i in range(num_images):
-        imgs = None
-        for x, y in dset.take(1):
-            imgs = [i for i in x]
+    imgs = []
 
-        img = Image.fromarray(np.uint8(imgs[0] * 255))
+    for x, y in iter(dset):
+        imgs.append(x)
+        num_images -= 1
+        if num_images <= 0:
+            break
+
+    for i, img in enumerate(imgs):
+        print(img.shape)
+        img = Image.fromarray(np.uint8(img[0] * 255))
         img.show()

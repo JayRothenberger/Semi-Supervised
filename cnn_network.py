@@ -21,7 +21,8 @@ def build_patchwise_vision_transformer(conv_filters,
                                        activation='selu',
                                        l1=None,
                                        l2=None,
-                                       dropout=0):
+                                       dropout=0,
+                                       loss='sparse_categorical_crossentropy'):
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),
@@ -29,14 +30,15 @@ def build_patchwise_vision_transformer(conv_filters,
         'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
         'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
     }
+
     # define the input layer (required)
     inputs = Input(image_size)
     x = inputs
     # set reference x separately to keep track of the input layer
     import math
     layers = max(int(math.log(image_size[0], 4)), int(math.log(image_size[1], 4)))
-    lense_filters = 2*x.shape[-1]*layers
-    for layer in range(layers + 2):
+    lense_filters = 3 * x.shape[-1] * layers
+    for layer in range(layers + 3):
         # here we keep track of the input of each block
         x = Conv2D(filters=lense_filters, kernel_size=(4, 4), **conv_params, padding='same')(x)
 
@@ -46,6 +48,7 @@ def build_patchwise_vision_transformer(conv_filters,
         x = Conv2D(filters=filters, kernel_size=(kernel, kernel), strides=(kernel, kernel), activation=activation,
                    **conv_params)(x)
 
+    print(attention_heads)
     for i, heads in enumerate(attention_heads):
         # for all layers except the last one, we return sequences
         key_dim = value_dim = x.shape[1]
@@ -67,18 +70,22 @@ def build_patchwise_vision_transformer(conv_filters,
 
     x = Flatten()(x)
 
+    for i in range(16, 64, 16)[::-1]:
+        x = Dense(i, activation='selu')(x)
+
     outputs = Dense(n_classes, activation=tf.keras.activations.softmax)(x)
+    # build the model
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'vit_model_{"%02d" % time()}')
 
     opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
                                     beta_1=0.9, beta_2=0.999,
                                     epsilon=None, decay=0.99)
-    # build the model
-    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
-                           name=f'vat_model_{"%02d" % time()}')
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
     # compile the model
-    model.compile(loss='sparse_categorical_crossentropy',
+    model.compile(loss=loss,
                   optimizer=opt,
-                  metrics=['sparse_categorical_accuracy'])
+                  metrics=[accuracy])
 
     return model
 

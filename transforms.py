@@ -291,14 +291,14 @@ def posterize(image: tf.Tensor, bits: float) -> tf.Tensor:
 
 def translate_x(image: tf.Tensor, fraction: float, replace: float = 0.0) -> tf.Tensor:
     """Equivalent of PIL Translate in X dimension."""
-    pixels = image.shape[0] * fraction
+    pixels = image[0].shape[0] * fraction
     image = translate(wrap(image), [-pixels, 0])
     return unwrap(image, replace)
 
 
 def translate_y(image: tf.Tensor, fraction: float, replace: float = 0.0) -> tf.Tensor:
     """Equivalent of PIL Translate in Y dimension."""
-    pixels = image.shape[0] * fraction
+    pixels = image[0].shape[0] * fraction
     image = translate(wrap(image), [0, -pixels])
     return unwrap(image, replace)
 
@@ -496,8 +496,8 @@ def custom_rand_augment_object(M, N, leq_M=False):
         :param img: image to augment
         :return: augmented image
         """
-        transforms = [identity, autocontrast, equalize, rotate, color, contrast, brightness,
-                      sharpness, shear_x, shear_y, translate_x, translate_y]
+        transforms = [identity, rotate, brightness,
+                      shear_x, shear_y, translate_x, translate_y]
         # needs to take a rank 3 numpy tensor, and return a tensor of the same rank
         for op in np.random.choice(transforms, N):
             img = op(img, np.random.uniform(0, M)) if leq_M else op(img, M)
