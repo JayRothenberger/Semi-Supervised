@@ -113,16 +113,18 @@ def read_all_pkl(dirname, filebase):
 
     # Loop over matching files
     for f in files:
-        fp = open("%s/%s" % (dirname, f), "rb")
-        r = pickle.load(fp)
-        fp.close()
-        results.append(r)
+        with open("%s/%s" % (dirname, f), "rb") as fp:
+            try:
+                results.append(pickle.load(fp))
+            except Exception as e:
+                print(e)
 
     return results
 
 
-def update_evaluator(evaluator, dir='results/'):
-    pkl = read_all_pkl(dir, 'model')
+def update_evaluator(evaluator, dir='results/', fbase=''):
+    pkl = read_all_pkl(dir, fbase)
+
     for model in pkl:
         evaluator.append(model)
 

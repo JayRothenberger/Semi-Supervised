@@ -5,7 +5,7 @@ import os
 
 import pickle
 
-from data_generator import to_flow, prepare_dset
+from data_generator import to_flow
 from keras.preprocessing.image import ImageDataGenerator
 from cleverhans.tf2.attacks.projected_gradient_descent import projected_gradient_descent
 
@@ -65,10 +65,8 @@ def pgd_attack(model, dataset, epsilons, budget=1, steps=0):
         for j in range(steps):
             print(j, end='\r')
             # retrieve one batch
-            z = dataset.take(1).as_numpy_iterator()
-            x, y = None, None
-            for zx, zy in z:
-                x, y = zx, zy
+            z = iter(dataset.take(1))
+            x, y = z[0], z[1]
 
             delta = 1e-4
             # perform the attack

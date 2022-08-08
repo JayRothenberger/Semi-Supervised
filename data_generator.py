@@ -99,92 +99,14 @@ def report(df):
     return table
 
 
-def data_generators(df, val_dirlist=None, image_size=(128, 128), batch_size=16, train_fraction=.05):
-    """
-    Return train, val, test generators that generate batches of data to be input for training or evaluation of a
-    model
-
-    :param df: dataframe containing all of the data
-    :param image_size: shape to resize images to tuple of (int, int)
-    :param batch_size: batch size for generated batches
-    :param val_dirlist: (optional) list of directories for validation and testing data
-    :param train_fraction: fraction of training data to use
-    :param rand_augment: tuple of (M, N) parameters for rand augment
-    :return: returns four data generators train, withheld, val, test
-    """
-
-    if val_dirlist is None:
-        train, val, test = train_val_test_split(df)
-    else:
-        train, (val, test) = df, train_test_split(val_dirlist, test_size=.5, shuffle=True, random_state=42)
-
-    if train_fraction < 1:
-        train, train_withheld = train_test_split(train, test_size=(1 - train_fraction), shuffle=False)
-    else:
-        train, train_withheld = train, None
-
-    print('train: ')
-    report(train)
-    print('validation: ')
-    report(val)
-    print('test: ')
-    report(test)
-    print('training withheld')
-    report(train_withheld)
-
-    image_gen = ImageDataGenerator(rescale=1. / 255)
-
-    train_gen = image_gen.flow_from_dataframe(train,
-                                              x_col='filepath',
-                                              y_col='class',
-                                              target_size=image_size,
-                                              color_mode='rgb',
-                                              class_mode='sparse',
-                                              batch_size=batch_size)
-
-    withheld_gen = None
-
-    if train_fraction < 1:
-        withheld_gen = image_gen.flow_from_dataframe(train_withheld,
-                                                     x_col='filepath',
-                                                     y_col='class',
-                                                     target_size=image_size,
-                                                     color_mode='rgb',
-                                                     class_mode='sparse',
-                                                     batch_size=batch_size,
-                                                     shuffle=False)
-
-    val_gen = image_gen.flow_from_dataframe(val,
-                                            x_col='filepath',
-                                            y_col='class',
-                                            target_size=image_size,
-                                            color_mode='rgb',
-                                            class_mode='sparse',
-                                            batch_size=batch_size,
-                                            shuffle=False)
-
-    test_gen = image_gen.flow_from_dataframe(test,
-                                             x_col='filepath',
-                                             y_col='class',
-                                             target_size=image_size,
-                                             color_mode='rgb',
-                                             class_mode='sparse',
-                                             batch_size=batch_size,
-                                             shuffle=False)
-
-    return train_gen, withheld_gen, val_gen, test_gen
-
-
 def split_dataframes(df, val_dirlist=None, train_fraction=.05):
     """
-    Return train, val, test generators that generate batches of data to be input for training or evaluation of a
-    model
+    Return train, withheld, val, test dataframes to be turned into datasets or flows to be used as input for training or
+    evaluation of a model
 
     :param df: dataframe containing all of the data
-    :param batch_size: batch size for generated batches
     :param val_dirlist: (optional) list of directories for validation and testing data
     :param train_fraction: fraction of training data to use
-    :param rand_augment: tuple of (M, N) parameters for rand augment
     :return: returns three data generators train, val, test
     """
     if val_dirlist is None:
@@ -209,6 +131,65 @@ def split_dataframes(df, val_dirlist=None, train_fraction=.05):
     image_gen = ImageDataGenerator(rescale=1. / 255)
 
     return train, train_withheld, val, test, image_gen
+
+
+def get_cv_rotation(dirlist, rotation=0, k=5, train_fraction=1):
+    """
+    Return train, withheld, val, test dataframes
+
+    :param dirlist: list of directories containing the data
+    :param rotation: rotation of cross validation
+    :param k: number of folds for cross_validation
+    :param train_fraction: fraction of training data to use
+    :return: returns three data generators train, val, test
+    """
+    assert isinstance(k, int), "k should be integer"
+    assert isinstance(rotation, int), "rotation should be integer"
+    assert rotation < k, "rotation must always be less than k"
+    assert rotation >= 0, "rotation must be strictly nonnegative"
+    assert k >= 1, "k must be strictly positive"
+
+    # want to split this into k shards and then
+    df = df_from_dirlist(dirlist)
+    # shuffle the dataframe
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+    # shard the dataframe
+    shards = [df[i*(len(df) // (k + 1)):(i+1)*(len(df) // (k + 1))] if i < k else df[i*(len(df) // (k + 1)):]
+              for i in range(k + 1)]
+    # test is always the last shard
+    test, shards = shards[-1], shards[:-1]
+    val = shards[rotation]
+    train = pd.concat([shards[i] for i in range(k) if i != rotation])
+
+    if train_fraction < 1:
+        train, train_withheld = train_test_split(train, test_size=(1 - train_fraction), shuffle=False)
+    else:
+        train, train_withheld = train, None
+
+    print('train: ')
+    report(train)
+    print('training withheld: ')
+    report(train_withheld)
+    print('validation: ')
+    report(val)
+    print('test: ')
+    report(test)
+
+    return train, train_withheld, val, test
+
+
+def load_unlabeled(dirlist):
+    file_lists = []
+    for directory in dirlist:
+        file_list = []
+        for path, directories, files in os.walk(directory):
+            for file in files:
+                file_list.append(os.path.join(path, file))
+        file_lists.append(file_list)
+
+    names = sum(file_lists, [])
+    print(f'parsed unlabeled data: {len(names)} examples found')
+    return pd.DataFrame(names, columns=['filepath'])
 
 
 def to_flow(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16):
@@ -243,9 +224,9 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
         image = tf.image.resize(image, target_shape)
 
         if class_mode == 'categorical':
-            label = tf.one_hot(tf.strings.to_number(label, tf.dtypes.int32), 3, dtype=tf.uint8)
+            label = tf.one_hot(tf.strings.to_number(label, tf.dtypes.int32), 3, dtype=tf.float32)
         elif class_mode == 'sparse':
-            label = tf.strings.to_number(label, tf.dtypes.uint8)
+            label = tf.strings.to_number(label, tf.dtypes.int32)
         else:
             raise ValueError('improper class mode')
 
@@ -253,15 +234,15 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
 
     df['class'] = df['class'].astype(str)
     slices = df.to_numpy()
-
+    out_type = tf.int32 if class_mode == 'sparse' else tf.float32
     # variable size element makes this impossible to convert to tensor???
     if shuffle:
         return tf.data.Dataset.from_tensor_slices(
             slices
-        ).repeat().shuffle(len(slices), seed, True).map(lambda x:
+        ).cache().repeat().shuffle(len(slices), seed, True).map(lambda x:
                                                         tf.py_function(func=preprocess_image,
                                                                        inp=[x, image_size],
-                                                                       Tout=(tf.float32, tf.uint8)),
+                                                                       Tout=(tf.float32, out_type)),
                                                         num_parallel_calls=tf.data.AUTOTUNE).batch(
             batch_size).prefetch(prefetch)
     else:
@@ -270,7 +251,7 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
         ).repeat().map(lambda x:
                        tf.py_function(func=preprocess_image,
                                       inp=[x, image_size],
-                                      Tout=(tf.float32, tf.uint8)),
+                                      Tout=(tf.float32, out_type)),
                        num_parallel_calls=tf.data.AUTOTUNE).batch(batch_size).prefetch(prefetch)
 
 

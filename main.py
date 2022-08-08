@@ -9,8 +9,6 @@ import matplotlib.pyplot as plt
 import gc
 from time import time
 import numpy as np
-import imgaug as ia
-from imgaug import augmenters as iaa
 
 # code supplied locally
 import experiment
@@ -19,7 +17,8 @@ from make_figure import *
 from data_structures import *
 from cnn_network import build_parallel_functional_model, build_patchwise_vision_transformer
 from transforms import rand_augment_object, custom_rand_augment_object
-from data_generator import augment_with_neighbors, get_dataframes_self_train, to_flow, to_dataset
+from data_generator import augment_with_neighbors, get_dataframes_self_train, to_dataset, to_flow, get_cv_rotation,\
+    load_unlabeled
 
 
 def create_parser():
@@ -43,6 +42,10 @@ def create_parser():
     parser.add_argument('--label', type=str, default="", help="Experiment label")
     parser.add_argument('--exp_type', type=str, default='test', help="Experiment type")
     parser.add_argument('--results_path', type=str, default=os.curdir + '/../results', help='Results directory')
+    parser.add_argument('--cv_rotation', type=int, default=0, help='positive int in [0, k],'
+                                                                   ' rotation of cross-validation to execute')
+    parser.add_argument('--cv_k', type=int, default=4, help='positive int - number of rotations of cross-validation')
+    parser.add_argument('--cross_validate', action='store_true', help='Perform k-fold cross-validation')
 
     # Semi-supervised parameters
     parser.add_argument('--train_fraction', type=float, default=0.05, help="fraction of available training data to use")
@@ -112,25 +115,25 @@ def exp_type_to_hyperparameters(args):
     @return a dictionary of hyperparameters
     """
     switch = {
-        'full': {
-            'filters': [[32, 64, 128, 128]],
-            'kernels': [[4, 2, 1, 1]],
-            'hidden': [[4, 4, 4, 4]],
+        'control': {
+            'filters': [[36, 64]],
+            'kernels': [[4, 1]],
+            'hidden': [[3, 3]],
             'l1': [None],
-            'l2': [1e-4],
-            'dropout': [0],
+            'l2': [None],
+            'dropout': [0.1],
             'train_iterations': [20],
-            'train_fraction': [(i + 1) * .05 for i in range(20)],  # .05, .1, .15, ..., 1.0
-            'epochs': [100],
-            'augment_batch': [284],
-            'sample': [.1],
-            'distance_function': ['confidence'],
-            'rand_M': [0.1],
-            'rand_N': [2],
-            'steps_per_epoch': [None],
-            'patience': [16],
-            'batch': [32],
-            'lrate': [1e-4]
+            'train_fraction': [1],
+            'epochs': [512],
+            'convex_dim': [1],
+            'convex_prob': [0],
+            'steps_per_epoch': [512],
+            'patience': [32],
+            'batch': [48],
+            'lrate': [1e-4],
+            'randAugment': [False],
+            'peek': [False],
+            'convexAugment': [False]
         },
         'test': {
             'filters': [[36, 64]],
@@ -142,11 +145,11 @@ def exp_type_to_hyperparameters(args):
             'train_iterations': [20],
             'train_fraction': [1],
             'epochs': [512],
-            'convex_dim': [[2, 3]],
-            'convex_prob': [[.1, .25, .5, .75]],
+            'convex_dim': [8],
+            'convex_prob': [.25],
             'steps_per_epoch': [512],
             'patience': [32],
-            'batch': [16],
+            'batch': [20],
             'lrate': [1e-4],
             'randAugment': [False],
             'peek': [False],
@@ -241,7 +244,7 @@ def prep_gpu(gpu=False, style='a100'):
         print('NO GPU')
 
 
-def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, augment_fn=None, evaluate_on=None):
+def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df, augment_fn=None, evaluate_on=None):
     print('args', args)
     import distances
     dist_func_selector = {
@@ -250,10 +253,9 @@ def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, 
         'confidence': distances.confidence
     }
 
-    default_image_gen = tf.keras.preprocessing.image.ImageDataGenerator(rescale=1. / 255)
+    default_image_gen = tf.keras.preprocessing.image.ImageDataGenerator()
 
     model = None
-    train_old = None
     labeled = train_df
     for train_iteration in range(args.train_iterations):
         if not train_iteration or args.retrain_fully:
@@ -264,8 +266,8 @@ def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, 
                                     to_dataset(train_df, shuffle=True),
                                     to_dataset(val_df),
                                     train_steps=args.steps_per_epoch,
+                                    val_steps=len(val_df) // args.batch,
                                     evaluate_on={'val': to_flow(val_df, default_image_gen),
-                                                 'withheld': to_flow(withheld_df, default_image_gen),
                                                  'test': to_flow(test_df, default_image_gen)}
                                     )
 
@@ -280,21 +282,21 @@ def self_train(args, network_fn, network_params, train_df, val_df, withheld_df, 
         if distance_function is None:
             raise ValueError('unrecognized experiment type')
 
-        if withheld_df is not None and (len(withheld_df) - args.augment_batch) > 0:
-            print(len(withheld_df))
+        if unlabeled_df is not None and (len(unlabeled_df) - args.augment_batch) > 0:
+            print(len(unlabeled_df))
             tf.keras.backend.clear_session()
             gc.collect()
 
             # replace the generators and dataframes with the updated ones from augment_with_neighbors
-            train_df, withheld_df, labeled = augment_with_neighbors(args,
-                                                                    model,
-                                                                    image_size,
-                                                                    distance_fn=distance_function,
-                                                                    image_gen=default_image_gen,
-                                                                    pseudolabeled_data=train_df,
-                                                                    unlabeled_data=withheld_df,
-                                                                    labeled_data=labeled,
-                                                                    sample=args.sample)
+            train_df, unlabeled_df, labeled = augment_with_neighbors(args,
+                                                                     model,
+                                                                     image_size,
+                                                                     distance_fn=distance_function,
+                                                                     image_gen=default_image_gen,
+                                                                     pseudolabeled_data=train_df,
+                                                                     unlabeled_data=unlabeled_df,
+                                                                     labeled_data=labeled,
+                                                                     sample=args.sample)
         else:
             print('not enough data for an additional iteration of training!')
             print(f'stopped after {train_iteration} iterations!')
@@ -381,16 +383,32 @@ def explore_lense_channels(dset, num_images, model_path='/../results/vit_model_9
             to_show.save(fp)
 
 
-def blended_dset(train_df, batch_size=16, n_blended=2, image_size=(256, 256, 3), prefetch=4, prob=None):
+def blended_dset(train_df, batch_size=16, n_blended=2, image_size=(256, 256, 3), prefetch=4, prob=None, std=.1):
+    """
+    :param train_df: dataframe of training image paths
+    :param batch_size: size of batches to return from the generator
+    :param n_blended: number of examples to blend together
+    :param image_size: shape of the input image tensor
+    :param prefetch: number of examples to pre fetch from disk
+    :param prob: probability of repacing a training batch with a convex combination of n_blended
+    :param std: standard deviation of (mean 0) gaussian noise to add to images before blending
+                (0.0 or equivalently None for no noise)
+    """
     # what if we take elements in our dataset and blend them together and predict the mean label?
     # need two train sets to blend together
 
-    prob = prob if prob is not None else 1
+    prob = prob if prob is not None else 1.0
+    std = float(std) if std is not None else 0.0
+
+    def add_gaussian_noise(x, y, std=1.0):
+        return x + tf.random.normal(shape=x.shape, mean=0.0, stddev=std, dtype=tf.float32), y
 
     def arg_free_gen():
         # create a generator which will be turned into the new Dataset object
-        dataset = to_dataset(train_df, shuffle=True, batch_size=batch_size, seed=42, prefetch=prefetch,
-                             class_mode='categorical').window(n_blended).prefetch(prefetch)
+        dataset = to_dataset(train_df, shuffle=True, batch_size=batch_size, seed=42, prefetch=n_blended,
+                             class_mode='categorical').map(
+            lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, std], Tout=(tf.float32, tf.float32)),
+            num_parallel_calls=tf.data.AUTOTUNE).window(n_blended).prefetch(prefetch)
 
         def random_weighting(n):
             # get a random weighting chosen uniformly from the convex hull of the unit vectors.
@@ -426,6 +444,10 @@ def blended_dset(train_df, batch_size=16, n_blended=2, image_size=(256, 256, 3),
 
 
 def fix_image_df(df):
+    """
+    Take in a dataframe of absolute image paths.  PIL opens and then saves them again, this can fix image corruption
+    errors in tensorflow
+    """
     from PIL import Image
 
     def verify_jpeg_image(file_path):
@@ -446,11 +468,15 @@ def fix_image_df(df):
             goods += 1
         else:
             bads += 1
-
-    print('bads:', bads, 'goods', goods)
+    # print the number of images that couldn't be saved, and the number fixed
+    print('irreparable:', bads, 'fixed', goods)
 
 
 def fix_image_dir(directory):
+    """
+    Take in the path of a directory.  PIL opens images in subdir structure and then saves them again, this can fix image
+    corruption errors in tensorflow.
+    """
     from PIL import Image
 
     file_list = []
@@ -478,7 +504,8 @@ def fix_image_dir(directory):
             bads += 1
             print(path)
 
-    print('bads:', bads, 'goods', goods)
+    # print the number of images that couldn't be saved, and the number fixed
+    print('irreparable:', bads, 'fixed', goods)
 
 
 def generate_fname(args):
@@ -515,7 +542,7 @@ def generate_fname(args):
     # learning rate
     lrate_str = "LR_%0.6f_" % args.lrate
 
-    return "%s/%s_%s_filt_%s_ker_%s_hidden_%s_l1_%s_l2_%s_drop_%s_frac_%s" % (
+    return "%s/%s_%s_filt_%s_ker_%s_hidden_%s_l1_%s_l2_%s_drop_%s_frac_%s_lrate_%s_%s" % (
         args.results_path,
         experiment_type_str,
         num_str,
@@ -525,7 +552,9 @@ def generate_fname(args):
         str(args.l1),
         str(args.l2),
         str(args.dropout),
-        str(args.train_fraction))
+        str(args.train_fraction),
+        lrate_str,
+        str(time()).replace('.', '')[-6:])
 
 
 if __name__ == '__main__':
@@ -543,11 +572,20 @@ if __name__ == '__main__':
              'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
              'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
 
-    print('getting dsets...')
+    unlabeled_paths = [os.curdir + '/../unlabeled/']
 
-    train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
-        [os.curdir + '/../data/' + path for path in paths],
-        train_fraction=args.train_fraction)
+    unlabeled_df = load_unlabeled(unlabeled_paths)
+
+    print('getting dsets...')
+    if args.cross_validate:
+        print(f'({args.cv_k}-fold) cross-validation rotation: {args.cv_rotation}')
+        train_df, withheld_df, val_df, test_df = get_cv_rotation(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction, k=args.cv_k, rotation=args.cv_rotation)
+    else:
+        train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction)
 
     network_params = {'learning_rate': args.lrate,
                       'conv_filters': args.filters,
@@ -573,11 +611,11 @@ if __name__ == '__main__':
     rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
     # data augmentation strategy selection
     if args.convexAugment and args.randAugment:
-        train_dset = blended_dset(train_df, args.batch, 2, prob=.25) \
+        train_dset = blended_dset(train_df, args.batch, args.convex_dim, prob=args.convex_prob) \
             .map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
                  num_parallel_calls=tf.data.AUTOTUNE, )
     elif args.convexAugment:
-        train_dset = blended_dset(train_df, args.batch, 2, prob=.25)
+        train_dset = blended_dset(train_df, args.batch, args.convex_dim, prob=args.convex_prob)
     elif args.randAugment:
         train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, class_mode=class_mode) \
             .map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
@@ -588,15 +626,15 @@ if __name__ == '__main__':
     if args.peek:
         explore_image_dataset(train_dset, 32)
         exit(-1)
-
+    # train the model
     model = network_fn(**network_params)
     model_data = start_training(args, model, train_dset, val_dset, train_steps=args.steps_per_epoch,
                                 val_steps=len(val_df) // args.batch)
-
+    # save the model
     try:
         with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
             pickle.dump(model_data, fp)
     except Exception as e:
         print(e)
-        with open(f'./vit_model{time()}', 'wb') as fp:
+        with open(f'./{generate_fname(args)}', 'wb') as fp:
             pickle.dump(model_data, fp)
