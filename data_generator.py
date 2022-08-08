@@ -248,7 +248,7 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
     else:
         return tf.data.Dataset.from_tensor_slices(
             slices
-        ).repeat().map(lambda x:
+        ).cache().repeat().map(lambda x:
                        tf.py_function(func=preprocess_image,
                                       inp=[x, image_size],
                                       Tout=(tf.float32, out_type)),

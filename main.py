@@ -37,6 +37,7 @@ def create_parser():
     # CPU/GPU
     parser.add_argument('--gpu', action='store_true', help='Use a GPU')
     parser.add_argument('--cpus_per_task', type=int, default=None, help='number of cpus per task available to the job')
+    parser.add_argument('--gpu_type', type=str, default="a100", help="a100 or v100 type of gpu training on")
 
     # High-level experiment configuration
     parser.add_argument('--label', type=str, default="", help="Experiment label")
@@ -146,14 +147,17 @@ def exp_type_to_hyperparameters(args):
             'train_fraction': [1],
             'epochs': [512],
             'convex_dim': [8],
-            'convex_prob': [.25],
+            'convex_prob': [.33],
             'steps_per_epoch': [512],
             'patience': [32],
             'batch': [20],
             'lrate': [1e-4],
-            'randAugment': [False],
+            'randAugment': [True],
             'peek': [False],
-            'convexAugment': [True]
+            'convexAugment': [True],
+            'cross_validate': [False],
+            'rand_M': [.1],
+            'rand_N': [2],
         },
     }
 
@@ -566,7 +570,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     args, args_str = augment_args(args)
 
-    prep_gpu(args.gpu)
+    prep_gpu(args.gpu, style=args.gpu_type)
 
     paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
              'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
@@ -574,7 +578,7 @@ if __name__ == '__main__':
 
     unlabeled_paths = [os.curdir + '/../unlabeled/']
 
-    unlabeled_df = load_unlabeled(unlabeled_paths)
+    # unlabeled_df = load_unlabeled(unlabeled_paths)
 
     print('getting dsets...')
     if args.cross_validate:
@@ -611,11 +615,11 @@ if __name__ == '__main__':
     rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
     # data augmentation strategy selection
     if args.convexAugment and args.randAugment:
-        train_dset = blended_dset(train_df, args.batch, args.convex_dim, prob=args.convex_prob) \
+        train_dset = blended_dset(train_df, args.batch, args.convex_dim, prob=args.convex_prob, std=.05) \
             .map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
                  num_parallel_calls=tf.data.AUTOTUNE, )
     elif args.convexAugment:
-        train_dset = blended_dset(train_df, args.batch, args.convex_dim, prob=args.convex_prob)
+        train_dset = blended_dset(train_df, args.batch, args.convex_dim, prob=args.convex_prob, std=.05)
     elif args.randAugment:
         train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, class_mode=class_mode) \
             .map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
@@ -624,7 +628,7 @@ if __name__ == '__main__':
         train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, class_mode=class_mode)
     # peek at the dataset instead of training
     if args.peek:
-        explore_image_dataset(train_dset, 32)
+        explore_image_dataset(train_dset, 8)
         exit(-1)
     # train the model
     model = network_fn(**network_params)

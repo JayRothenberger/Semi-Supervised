@@ -57,7 +57,7 @@ def figure_metric_epoch(evaluator, title, fname, metric):
     plt.title(title)
     plt.legend(legend)
     plt.xlabel('epoch')
-    plt.ylabel(f'loss / accuracy')
+    plt.ylabel(metric)
 
     # save the figure
     fig = plt.gcf()
@@ -79,7 +79,7 @@ if __name__ == "__main__":
         train_fraction=1)
 
     from data_structures import ModelEvaluator
-    from robustness import pgd_attack
+    from robustness import pgd_evaluation
 
     def prep_gpu(gpu=False, style='a100'):
         """prepare the GPU for tensorflow computation"""
@@ -106,6 +106,9 @@ if __name__ == "__main__":
 
     evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/', fbase='')
 
-    for metric in ['loss', 'categorical_accuracy']:
-        figure_metric_epoch(evaluator, 'Accuracy and Loss With / Without Augmentation',
+    pgd_evaluation(evaluator.models[0].get_model(), to_dataset(val_df, batch_size=1, class_mode='categorical'),
+               [1e-4, 1e-3, 1e-2, 1e-1], steps=1000)
+
+    for metric, name in [('loss', 'Loss'), ('categorical_accuracy', 'Accuracy')]:
+        figure_metric_epoch(evaluator, f'{name} With / Without Augmentation',
                             os.curdir + '/../visualizations/' + f'{metric}test.png', metric)
