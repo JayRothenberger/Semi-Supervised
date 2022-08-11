@@ -4,6 +4,7 @@ Experiment Management Code by Jay Rothenberger (jay.c.rothenberger@ou.edu)
 
 # code supplied by pip / conda
 import os
+import argparse
 
 import matplotlib.pyplot as plt
 import gc
@@ -15,10 +16,10 @@ import experiment
 from job_control import JobIterator
 from make_figure import *
 from data_structures import *
-from cnn_network import build_parallel_functional_model, build_patchwise_vision_transformer
-from transforms import rand_augment_object, custom_rand_augment_object
-from data_generator import augment_with_neighbors, get_dataframes_self_train, to_dataset, to_flow, get_cv_rotation,\
-    load_unlabeled
+from cnn_network import build_patchwise_vision_transformer
+from transforms import custom_rand_augment_object
+from data_generator import get_dataframes_self_train, to_dataset, get_cv_rotation, load_unlabeled
+from experiment import start_training, self_train
 
 
 def create_parser():
@@ -133,7 +134,7 @@ def exp_type_to_hyperparameters(args):
             'batch': [48],
             'lrate': [1e-4],
             'randAugment': [False],
-            'peek': [False],
+            'peek': [True],
             'convexAugment': [False]
         },
         'test': {
@@ -146,13 +147,13 @@ def exp_type_to_hyperparameters(args):
             'train_iterations': [20],
             'train_fraction': [1],
             'epochs': [512],
-            'convex_dim': [8],
-            'convex_prob': [.33],
+            'convex_dim': [2, 3],
+            'convex_prob': [1.0, .4],
             'steps_per_epoch': [512],
             'patience': [32],
-            'batch': [20],
+            'batch': [48],
             'lrate': [1e-4],
-            'randAugment': [True],
+            'randAugment': [False],
             'peek': [False],
             'convexAugment': [True],
             'cross_validate': [False],
@@ -202,28 +203,10 @@ def augment_args(args):
     return ji.set_attributes_by_index(args.exp, args)
 
 
-def start_training(args, model, train_dset, val_dset, evaluate_on=None, train_steps=None, val_steps=None):
-    # Override arguments if we are using exp_index
-
-    train_steps = train_steps if train_steps is not None else 100
-    val_steps = val_steps if val_steps is not None else 100
-
-    print(train_steps, val_steps)
-
-    evaluate_on = dict() if evaluate_on is None else evaluate_on
-
-    callbacks = [tf.keras.callbacks.EarlyStopping(patience=args.patience,
-                                                  restore_best_weights=True,
-                                                  min_delta=args.min_delta)]
-
-    return experiment.execute_exp(args, args_str, model, train_dset, val_dset, network_fn, network_params,
-                                  0, train_steps, val_steps, callbacks=callbacks, evaluate_on=evaluate_on)
-
-
 def prep_gpu(gpu=False, style='a100'):
     """prepare the GPU for tensorflow computation"""
     # tell tensorflow to be quiet
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    # os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
     # use the available cpus to set the parallelism level
     if args.cpus_per_task is not None:
         tf.config.threading.set_inter_op_parallelism_threads(args.cpus_per_task)
@@ -233,7 +216,8 @@ def prep_gpu(gpu=False, style='a100'):
     if not gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
     elif style == 'a100':
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # just use one GPU
+        pass
+        # os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # just use one GPU
     else:
         pass  # do nothing (v100)
 
@@ -242,149 +226,11 @@ def prep_gpu(gpu=False, style='a100'):
     n_physical_devices = len(physical_devices)
 
     if n_physical_devices > 0:
-        tf.config.experimental.set_memory_growth(physical_devices[0], True)
+        for physical_device in physical_devices:
+            tf.config.experimental.set_memory_growth(physical_device, True)
         print('We have %d GPUs\n' % n_physical_devices)
     else:
         print('NO GPU')
-
-
-def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df, augment_fn=None, evaluate_on=None):
-    print('args', args)
-    import distances
-    dist_func_selector = {
-        'euclidean': distances.euclidean,
-        'euclidean_with_confidence': distances.euclidean_with_confidence,
-        'confidence': distances.confidence
-    }
-
-    default_image_gen = tf.keras.preprocessing.image.ImageDataGenerator()
-
-    model = None
-    labeled = train_df
-    for train_iteration in range(args.train_iterations):
-        if not train_iteration or args.retrain_fully:
-            model = network_fn(**network_params)
-
-        model_data = start_training(args,
-                                    model,
-                                    to_dataset(train_df, shuffle=True),
-                                    to_dataset(val_df),
-                                    train_steps=args.steps_per_epoch,
-                                    val_steps=len(val_df) // args.batch,
-                                    evaluate_on={'val': to_flow(val_df, default_image_gen),
-                                                 'test': to_flow(test_df, default_image_gen)}
-                                    )
-
-        with open('%s/model_%s_%s_%s' % (args.results_path,
-                                         str(args.train_fraction),
-                                         str(train_iteration),
-                                         str(time())), 'wb') as fp:
-            pickle.dump(model_data, fp)
-
-        distance_function = dist_func_selector.get(args.distance_function)
-
-        if distance_function is None:
-            raise ValueError('unrecognized experiment type')
-
-        if unlabeled_df is not None and (len(unlabeled_df) - args.augment_batch) > 0:
-            print(len(unlabeled_df))
-            tf.keras.backend.clear_session()
-            gc.collect()
-
-            # replace the generators and dataframes with the updated ones from augment_with_neighbors
-            train_df, unlabeled_df, labeled = augment_with_neighbors(args,
-                                                                     model,
-                                                                     image_size,
-                                                                     distance_fn=distance_function,
-                                                                     image_gen=default_image_gen,
-                                                                     pseudolabeled_data=train_df,
-                                                                     unlabeled_data=unlabeled_df,
-                                                                     labeled_data=labeled,
-                                                                     sample=args.sample)
-        else:
-            print('not enough data for an additional iteration of training!')
-            print(f'stopped after {train_iteration} iterations!')
-            break
-        print('retraining: ', train_iteration)
-
-
-def explore_lense_channels(dset, num_images, model_path='/../results/vit_model_95', display=False):
-    """display num_images from dset"""
-    from PIL import Image
-    # for each image
-    for i in range(num_images):
-        imgs = None
-        # take candidate image
-        # separate image and label
-        for x, y in dset.take(1):
-            imgs = [x]
-
-        to_show = Image.fromarray(np.uint8(imgs[0][0] * 255))
-        with open(os.curdir + f'/../visualizations/input{i}.png', 'wb') as fp:
-            # save
-            to_show.save(fp)
-        if display:
-            # display
-            to_show.show()
-        # transform candidate using only the lense block layers
-        # get the model data
-        with open(os.curdir + model_path, 'rb') as fp:
-            model = pickle.load(fp)
-        # get the model
-        model = model.get_model()
-
-        new_output = None
-        for layer in model.layers:
-            try:
-                if layer.strides != 1 and layer.strides != (1, 1):
-                    break
-            except:
-                pass
-            new_output = layer
-        # create a new model with the lense outputs as the outputs
-        model = tf.keras.models.Model(inputs=[model.layers[0].input], outputs=[new_output.output])
-        opt = tf.keras.optimizers.Nadam(learning_rate=1e-4,
-                                        beta_1=0.9, beta_2=0.999,
-                                        epsilon=None, decay=0.99)
-
-        model.compile(loss='sparse_categorical_crossentropy',
-                      optimizer=opt,
-                      metrics=['sparse_categorical_accuracy'])
-
-        # get the lense layer outputs for the first image
-        volume = model.predict(np.array([imgs[0][0][:, :, :3], ]))[0]
-
-        import math
-        # construct the compound image
-        per_row = math.ceil(math.sqrt(volume.shape[-1] + imgs[0].shape[-1]))
-        square_size = imgs[0][0].shape[0]
-        arr = np.zeros((per_row * square_size, (((volume.shape[-1] + imgs[0].shape[-1]) // per_row) + 1) * square_size),
-                       np.uint8)
-        try:
-            for j in range(imgs[0].shape[-1]):
-                arr[(j % per_row) * square_size:(j + 1 % per_row) * square_size,
-                (j // per_row) * square_size:((j // per_row) + 1) * square_size] = np.uint8(
-                    (imgs[0][0][:, :, j] / np.max(imgs[0][0][:, :, j])) * 255)
-            for j in range(volume.shape[-1]):
-                volume[:, :, j] += -1 * min(0, np.min(volume[:, :, j]))
-            for j in range(imgs[0].shape[-1], volume.shape[-1] + imgs[0].shape[-1]):
-                x = (j % per_row) * square_size
-                y = (j // per_row) * square_size
-                arr[x:x + square_size, y:y + square_size] = np.uint8(
-                    (volume[:, :, j - imgs[0].shape[-1]] / np.max(volume[:, :, j - imgs[0].shape[-1]])) * 255)
-        except IndexError as v:
-            to_show = Image.fromarray(arr)
-            if display:
-                to_show.show()
-            print(j, per_row)
-            raise v
-        to_show = Image.fromarray(arr)
-        if display:
-            # display the compound image
-            to_show.show()
-        with open(os.curdir + f'/../visualizations/lense_output{i}.png', 'wb') as fp:
-            # save it
-            to_show.save(fp)
 
 
 def blended_dset(train_df, batch_size=16, n_blended=2, image_size=(256, 256, 3), prefetch=4, prob=None, std=.1):
@@ -399,7 +245,6 @@ def blended_dset(train_df, batch_size=16, n_blended=2, image_size=(256, 256, 3),
                 (0.0 or equivalently None for no noise)
     """
     # what if we take elements in our dataset and blend them together and predict the mean label?
-    # need two train sets to blend together
 
     prob = prob if prob is not None else 1.0
     std = float(std) if std is not None else 0.0
@@ -407,44 +252,173 @@ def blended_dset(train_df, batch_size=16, n_blended=2, image_size=(256, 256, 3),
     def add_gaussian_noise(x, y, std=1.0):
         return x + tf.random.normal(shape=x.shape, mean=0.0, stddev=std, dtype=tf.float32), y
 
-    def arg_free_gen():
-        # create a generator which will be turned into the new Dataset object
-        dataset = to_dataset(train_df, shuffle=True, batch_size=batch_size, seed=42, prefetch=n_blended,
-                             class_mode='categorical').map(
-            lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, std], Tout=(tf.float32, tf.float32)),
-            num_parallel_calls=tf.data.AUTOTUNE).window(n_blended).prefetch(prefetch)
+    # create a dataset from which to get batches to blend
+    dataset = to_dataset(train_df, shuffle=True, batch_size=batch_size, seed=42, prefetch=n_blended,
+                         class_mode='categorical').map(
+        lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, std], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE).batch(n_blended)
 
-        def random_weighting(n):
-            # get a random weighting chosen uniformly from the convex hull of the unit vectors.
-            samp = -1 * np.log(np.random.uniform(0, 1, n))
-            samp /= np.sum(samp)
-            return np.array(samp)
+    def random_weighting(n):
+        # get a random weighting chosen uniformly from the convex hull of the unit vectors.
+        samp = -1 * np.log(np.random.uniform(0, 1, n))
+        samp /= np.sum(samp)
+        return np.array(samp)
 
-        # the generator yields batches blended together with this weighting
-        for window in dataset:
-            x, y = window
+    # the generator yields batches blended together with this weighting
+    def blend(x, y):
+        """
+         sum a batch along the batch dimension weighted by a uniform random vector from the n-1 simplex
+          (convex hull of unit vectors)
+        """
+        if np.random.uniform(0, 1, 1) > prob:
+            return np.array([ex for ex in x][0]), np.array([ex for ex in y][0]).astype(np.float32)
+        # compute the weights for the combination
+        weights = random_weighting(n_blended)
+        # yield the convex combination
+        try:
+            return tf.reduce_sum(np.array([weight * ex for ex, weight in zip(x, weights)]), axis=0), \
+                   tf.reduce_sum(np.array([weight * tf.cast(ex, tf.float32) for ex, weight in zip(y, weights)]),
+                                 axis=0)
+        except ValueError as e:
+            # sometimes (infrequently) our batches differ in size and cannot be stacked or meaned, we just need
+            # to retry
+            print(e)
 
-            if np.random.uniform(0, 1, 1) > prob:
-                yield np.array([ex for ex in x][0]), np.array([ex for ex in y][0]).astype(np.float32)
-                continue
-            # compute the weights for the combination
-            weights = random_weighting(n_blended)
-            # yield the convex combination
-            try:
-                yield tf.reduce_sum(np.array([weight * ex for ex, weight in zip(x, weights)]), axis=0), \
-                      tf.reduce_sum(np.array([weight * tf.cast(ex, tf.float32) for ex, weight in zip(y, weights)]),
-                                    axis=0)
-                continue
-            except ValueError as e:
-                # sometimes (infrequently) our batches differ in size and cannot be stacked or meaned, we just need
-                # to retry
-                print(e)
-                continue
+    # map the dataset with the blend function
+    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
 
-    # return the dataset object of the generator
-    return tf.data.Dataset.from_generator(arg_free_gen,
-                                          output_types=(tf.float32, tf.float32),
-                                          output_shapes=([None, *image_size], [None, 3]))
+    return dataset
+
+
+def mixup_dset(train_ds, prefetch=4, alpha=None):
+    """
+    :param train_ds: dataset of batches to train on
+    :param prefetch: number of examples to pre fetch from disk
+    :param alpha: Dirichlet parameter.  Weights are drawn from Dirichlet(alpha, ..., alpha) for combining two examples.
+                    Empirically choose a value in [.1, .4]
+    :return: a dataset
+    """
+    # what if we take elements in our dataset and blend them together and predict the mean label?
+
+    alpha = alpha if alpha is not None else 1.0
+
+    rng = np.random.default_rng()
+
+    # create a dataset from which to get batches to blend
+    dataset = train_ds.batch(2)
+
+    def random_weighting(n):
+        return rng.dirichlet([alpha for i in range(n + 1)], 1)
+
+    # the generator yields batches blended together with this weighting
+    def blend(x, y):
+        """
+         sum a batch along the batch dimension weighted by a uniform random vector from the n-1 simplex
+          (convex hull of unit vectors)
+        """
+        # compute the weights for the combination
+        weights = random_weighting(2)
+        # return the convex combination
+        return tf.reduce_sum(np.array([weight * ex for ex, weight in zip(x, weights)]), axis=0), \
+               tf.reduce_sum(np.array([weight * tf.cast(ex, tf.float32) for ex, weight in zip(y, weights)]),
+                             axis=0)
+
+    # map the dataset with the blend function
+    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
+
+    return dataset
+
+
+def bc_plus(train_ds, prefetch=4):
+    """
+    :param train_ds: dataset of batches to train on
+    :param prefetch: number of examples to pre fetch from disk
+    :param alpha: Dirichlet parameter.  Weights are drawn from Dirichlet(alpha, ..., alpha) for combining two examples.
+                    Empirically choose a value in [.1, .4]
+    :return: a dataset
+    """
+    # what if we take elements in our dataset and blend them together and predict the mean label?
+
+    rng = np.random.default_rng()
+
+    # create a dataset from which to get batches to blend
+    dataset = train_ds.batch(2)
+
+    def random_weighting(n):
+        return rng.dirichlet([1 for i in range(n + 1)], 1)
+
+    # the generator yields batches blended together with this weighting
+    def blend(x, y):
+        """
+         sum a batch along the batch dimension weighted by a uniform random vector from the n simplex
+          (convex hull of unit vectors)
+        """
+        # compute the weights for the combination
+        weights = random_weighting(2)
+        weights *= float(1 / np.linalg.norm(weights))
+        weights = np.array(weights, dtype=np.double).reshape(-1, 1)
+        x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
+        y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
+        x = x - tf.reduce_mean(x)
+        # return the convex combination
+        return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
+
+    # map the dataset with the blend function
+    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
+
+    return dataset
+
+
+def my_mixup_dset(train_ds, n_blended=2, prefetch=4, alpha=.25):
+    """
+    :param train_ds: dataset of batches to train on
+    :param n_blended: number of examples to mix
+    :param prefetch: number of examples to pre fetch from disk
+    :param alpha: Dirichlet parameter.  Weights are drawn from Dirichlet(alpha, ..., alpha) for combining two examples.
+                    Empirically choose a value in [.1, .4]
+    :return: a dataset
+    """
+    # what if we take elements in our dataset and blend them together and predict the mean label?
+
+    alpha = alpha if alpha is not None else 1.0
+
+    rng = np.random.default_rng()
+
+    def add_gaussian_noise(x, y, std=0.01):
+        return x + tf.random.normal(shape=x.shape, mean=0.0, stddev=std, dtype=tf.float32), y
+
+    # create a dataset from which to get batches to blend
+    dataset = train_ds.map(
+        lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, .01], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE).batch(n_blended)
+
+    def random_weighting(n):
+        return rng.dirichlet(tuple([alpha for i in range(n)]), 1)
+
+    # the generator yields batches blended together with this weighting
+    def blend(x, y):
+        """
+         sum a batch along the batch dimension weighted by a uniform random vector from the n simplex
+          (convex hull of unit vectors)
+        """
+        # compute the weights for the combination
+        weights = random_weighting(n_blended)
+        weights *= float(1 / np.linalg.norm(weights))
+        weights = np.array(weights, dtype=np.double).reshape(-1, 1)
+        x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
+        y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
+        x = x - tf.reduce_mean(x)
+        # return the convex combination
+        return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
+
+    # map the dataset with the blend function
+    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
+
+    return dataset
 
 
 def fix_image_df(df):
@@ -611,6 +585,8 @@ if __name__ == '__main__':
     """
     class_mode = network_params['loss'].split('_')[0]
     val_dset = to_dataset(val_df, shuffle=True, batch_size=args.batch, class_mode=class_mode)
+    train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
+                            class_mode='categorical', center=True)
     # define our randAugment object
     rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
     # data augmentation strategy selection
@@ -619,21 +595,23 @@ if __name__ == '__main__':
             .map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
                  num_parallel_calls=tf.data.AUTOTUNE, )
     elif args.convexAugment:
-        train_dset = blended_dset(train_df, args.batch, args.convex_dim, prob=args.convex_prob, std=.05)
+        train_dset = my_mixup_dset(train_dset, args.convex_dim, 8, args.convex_prob)
     elif args.randAugment:
-        train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, class_mode=class_mode) \
-            .map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
-                 num_parallel_calls=tf.data.AUTOTUNE, )
-    else:
-        train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, class_mode=class_mode)
+        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                                    num_parallel_calls=tf.data.AUTOTUNE, )
+
     # peek at the dataset instead of training
     if args.peek:
         explore_image_dataset(train_dset, 8)
         exit(-1)
-    # train the model
+    # create the scope
+    # strategy = tf.distribute.MirroredStrategy()
+    # with strategy.scope():
+    # build the model (in the scope)
     model = network_fn(**network_params)
-    model_data = start_training(args, model, train_dset, val_dset, train_steps=args.steps_per_epoch,
-                                val_steps=len(val_df) // args.batch)
+    # train the model
+    model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                                train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
     # save the model
     try:
         with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:

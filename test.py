@@ -19,7 +19,7 @@ def varying_args(evaluator):
                 if args_object[arg] != args_objects[0][arg]:
                     keys.add(arg)
             except:
-                print(arg)
+                pass
 
     return keys
 
@@ -29,21 +29,23 @@ def figure_metric_epoch(evaluator, title, fname, metric):
     to_plot = []
     to_print = []
     varying = varying_args(evaluator)
+    varying -= {'cpus_per_task', 'exp_type', 'exp', 'rand_M', 'rand_N', 'gpu_type'}
 
     for model in evaluator.models:
         def plot(metric, series, c):
-            to_plot.append((series, {'linestyle': '-'}))
+            to_plot.append((series, {'linestyle': '-', 'c': c}))
             vals = vars(model.args)
             legend.append(metric + ' ' + ' | '.join([f'{val} {vals[val]}' for val in varying]))
             if 'loss' in metric:
                 to_print.append((metric + ' ' + ' | '.join([f'{val} {vals[val]}' for val in varying]), min(series)))
             else:
                 to_print.append((metric + ' ' + ' | '.join([f'{val} {vals[val]}' for val in varying]), max(series)))
+
         # plot the metric v.s. epochs for each model
         r = float(np.random.uniform(0, 1, 1))
         try:
             # plot(metric, model.history[metric], (r, .25, .25))
-            plot('val_' + metric, model.history['val_' + metric], (r, .25, .75))
+            plot('val_' + metric, model.history['val_' + metric], (r, model.args.convex_prob / 1.5, model.args.convex_dim / 5))
         except:
             # plot('sparse_' + metric, model.history['sparse_' + metric], (r, .75, .25))
             plot('val_sparse_' + metric, model.history['val_sparse_' + metric], (r, .75, .75))
@@ -81,6 +83,7 @@ if __name__ == "__main__":
     from data_structures import ModelEvaluator
     from robustness import pgd_evaluation
 
+
     def prep_gpu(gpu=False, style='a100'):
         """prepare the GPU for tensorflow computation"""
         # tell tensorflow to be quiet
@@ -102,12 +105,26 @@ if __name__ == "__main__":
             print('We have %d GPUs\n' % n_physical_devices)
         else:
             print('NO GPU')
+
+
     prep_gpu(True)
 
     evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/', fbase='')
+    for model in evaluator.models:
+        break
+        print(model.args)
 
-    pgd_evaluation(evaluator.models[0].get_model(), to_dataset(val_df, batch_size=1, class_mode='categorical'),
-               [1e-4, 1e-3, 1e-2, 1e-1], steps=1000)
+        def get_model(model):
+            # return the keras model
+            model.network_params['loss'] = 'categorical_crossentropy'
+            k_model = model.network_fn(**model.network_params)
+            k_model.set_weights(model.weights)
+            return k_model
+        pgd_evaluation(
+                       get_model(model),
+                       to_dataset(val_df, batch_size=24, shuffle=True, class_mode='categorical'),
+                       [1e-4, 1e-3, 1e-2, 1e-1], steps=12
+                       )
 
     for metric, name in [('loss', 'Loss'), ('categorical_accuracy', 'Accuracy')]:
         figure_metric_epoch(evaluator, f'{name} With / Without Augmentation',

@@ -3,17 +3,12 @@ Example code for creating a figure using matplotlib to display tensorflow model 
 
 Jay Rothenberger (jay.c.rothenberger@ou.edu)
 """
-
-import os
-import re
-
 import matplotlib.pyplot as plt
-import pickle
-import numpy as np
 import pandas as pd
 import sklearn
-from sklearn.metrics import *
 from data_structures import *
+import tensorflow as tf
+from time import time
 
 
 def read_all_pkl(dirname, filebase):
@@ -41,6 +36,9 @@ def read_all_pkl(dirname, filebase):
 
 
 def figure_metric_epoch(evaluator, metric, title, fname, train_fraction=None):
+    """
+
+    """
     if isinstance(train_fraction, float):
         train_fraction = [train_fraction]
     elif train_fraction is None:
@@ -76,6 +74,11 @@ def figure_metric_epoch(evaluator, metric, title, fname, train_fraction=None):
 
 
 def save_confusion_matrix_fig(matrix, labels, title, fname):
+    """
+    takes in a square numpy matrix, a list of labels, a title for the figure, and a filename
+
+    saves a confusion matrix figure as fname
+    """
     display = sklearn.metrics.ConfusionMatrixDisplay(matrix, display_labels=labels)
     display.plot()
     plt.title(title)
@@ -175,84 +178,8 @@ def print_metric_fn_training_fraction(metric='sparse_categorical_accuracy', fp="
     analysis.close()
 
 
-def basic_supervised(dir='results/'):
-    """
-    If we're displaying results for the basic SL experiment, we run this code
-
-    :param dir: directory from which to load ModelData instances
-    """
-    evaluator = ModelEvaluator([])
-    evaluator = update_evaluator(evaluator, dir)
-    rows = []
-
-    for model in evaluator.models:
-        save_confusion_matrix_fig(model.val_confusion_matrix(),
-                                  labels=model.classes,
-                                  title=(
-                                      f"Validation Confusion Matrix with l1={model.network_params['l1']}, "
-                                      f"l2={model.network_params['l2']}, dropout={model.network_params['dropout']}"
-                                  ),
-                                  fname=(
-                                      f"val_matrix_l1_{model.network_params['l1']}__l2_{model.network_params['l2']}__"
-                                      f"drop_{model.network_params['dropout']}.png"
-                                  )
-                                  )
-        rows.append((model.train_metrics['sparse_categorical_accuracy'],
-                     model.val_metrics['sparse_categorical_accuracy'], model.network_params['l1'],
-                     model.network_params['l2'], model.network_params['dropout']))
-
-    df = pd.DataFrame(rows, columns=["Training Accuracy", "Validation Accuracy", "L1", "L2", "Dropout"])
-    df.to_csv('accuracy_evaluations.csv')
-
-    # Creating the plots of training accuracy (for basic Supervised Learning models)
-    figure_metric_epoch(evaluator, metric='sparse_categorical_accuracy',
-                        title="Training Accuracy as a Function of Epochs",
-                        fname="train_accuracy_plots_basic.png"
-                        )
-    # Creating the plots of validation accuracy (for basic Supervised Learning models)
-    figure_metric_epoch(evaluator, metric='val_sparse_categorical_accuracy',
-                        title="Validation Accuracy as a Function of Epochs",
-                        fname="valid_accuracy_plots_basic.png"
-                        )
-
-
-# make figure
-def train_fraction_split(dir='results/'):
-    """
-    If we're displaying results for the train-fraction-split SL experiment, we run this code
-
-    :param dir: directory from which to load ModelData instances
-    """
-    evaluator = ModelEvaluator([])
-    evaluator = update_evaluator(evaluator, dir)
-    rows = []
-
-    for value in get_train_fractions(evaluator):
-        best = evaluator.best_hyperparams(value)
-        save_confusion_matrix_fig(best.val_confusion_matrix(),
-                                  labels=best.classes,
-                                  title=f"Validation Confusion Matrix with Training Fraction={str(value)[0:4]}",
-                                  fname=f"val_matrix_train_fraction_{str(value)[0:4]}.png")
-        rows.append((best.train_metrics['sparse_categorical_accuracy'],
-                     best.val_metrics['sparse_categorical_accuracy'],
-                     str(value)[0:4]))
-    df = pd.DataFrame(rows, columns=["Training Accuracy", "Validation Accuracy", "Training Fraction"])
-    df.to_csv('accuracy_evaluations_train_fraction.csv')
-
-    # Creating the plots for the train-fraction-split Supervised Learning models
-    figure_metric_epoch(evaluator, metric='sparse_categorical_accuracy',
-                        title="Training Accuracy as a Function of Epochs",
-                        fname="train_accuracy_plots_train_fraction.png"
-                        )
-    # Creating the plots of validation accuracy (for basic Supervised Learning models)
-    figure_metric_epoch(evaluator, metric='val_sparse_categorical_accuracy',
-                        title="Validation Accuracy as a Function of Epochs",
-                        fname="valid_accuracy_plots_train_fraction.png"
-                        )
-
-
-def explore_image_dataset(dset, num_images):
-    """display num_images from dset"""
+def explore_image_dataset(dset, num_images, fname=''):
+    """save num_images from dset for visualization"""
     from PIL import Image
 
     imgs = []
@@ -264,6 +191,85 @@ def explore_image_dataset(dset, num_images):
             break
 
     for i, img in enumerate(imgs):
-        print(img.shape)
         img = Image.fromarray(np.uint8(img[0] * 255))
-        img.show()
+        with open(os.curdir + f'/../visualizations/perturbations/{i}_{fname}.jpg', 'wb') as fp:
+            img.save(fp)
+
+
+def explore_lense_channels(dset, num_images, model_path='/../results/vit_model_95', display=False):
+    """display an num_images from dset and the output channels of the lense convolution block"""
+    from PIL import Image
+    # for each image
+    for i in range(num_images):
+        imgs = None
+        # take candidate image
+        # separate image and label
+        for x, y in dset.take(1):
+            imgs = [x]
+
+        to_show = Image.fromarray(np.uint8(imgs[0][0] * 255))
+        with open(os.curdir + f'/../visualizations/input{i}.png', 'wb') as fp:
+            # save
+            to_show.save(fp)
+        if display:
+            # display
+            to_show.show()
+        # transform candidate using only the lense block layers
+        # get the model data
+        with open(os.curdir + model_path, 'rb') as fp:
+            model = pickle.load(fp)
+        # get the model
+        model = model.get_model()
+
+        new_output = None
+        for layer in model.layers:
+            try:
+                if layer.strides != 1 and layer.strides != (1, 1):
+                    break
+            except:
+                pass
+            new_output = layer
+        # create a new model with the lense outputs as the outputs
+        model = tf.keras.models.Model(inputs=[model.layers[0].input], outputs=[new_output.output])
+        opt = tf.keras.optimizers.Nadam(learning_rate=1e-4,
+                                        beta_1=0.9, beta_2=0.999,
+                                        epsilon=None, decay=0.99)
+
+        model.compile(loss='sparse_categorical_crossentropy',
+                      optimizer=opt,
+                      metrics=['sparse_categorical_accuracy'])
+
+        # get the lense layer outputs for the first image
+        volume = model.predict(np.array([imgs[0][0][:, :, :3], ]))[0]
+
+        import math
+        # construct the compound image
+        per_row = math.ceil(math.sqrt(volume.shape[-1] + imgs[0].shape[-1]))
+        square_size = imgs[0][0].shape[0]
+        arr = np.zeros((per_row * square_size, (((volume.shape[-1] + imgs[0].shape[-1]) // per_row) + 1) * square_size),
+                       np.uint8)
+        try:
+            for j in range(imgs[0].shape[-1]):
+                arr[(j % per_row) * square_size:(j + 1 % per_row) * square_size,
+                (j // per_row) * square_size:((j // per_row) + 1) * square_size] = np.uint8(
+                    (imgs[0][0][:, :, j] / np.max(imgs[0][0][:, :, j])) * 255)
+            for j in range(volume.shape[-1]):
+                volume[:, :, j] += -1 * min(0, np.min(volume[:, :, j]))
+            for j in range(imgs[0].shape[-1], volume.shape[-1] + imgs[0].shape[-1]):
+                x = (j % per_row) * square_size
+                y = (j // per_row) * square_size
+                arr[x:x + square_size, y:y + square_size] = np.uint8(
+                    (volume[:, :, j - imgs[0].shape[-1]] / np.max(volume[:, :, j - imgs[0].shape[-1]])) * 255)
+        except IndexError as v:
+            to_show = Image.fromarray(arr)
+            if display:
+                to_show.show()
+            print(j, per_row)
+            raise v
+        to_show = Image.fromarray(arr)
+        if display:
+            # display the compound image
+            to_show.show()
+        with open(os.curdir + f'/../visualizations/lense_output{i}.png', 'wb') as fp:
+            # save it
+            to_show.save(fp)

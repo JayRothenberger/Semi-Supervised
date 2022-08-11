@@ -154,7 +154,7 @@ def get_cv_rotation(dirlist, rotation=0, k=5, train_fraction=1):
     # shuffle the dataframe
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
     # shard the dataframe
-    shards = [df[i*(len(df) // (k + 1)):(i+1)*(len(df) // (k + 1))] if i < k else df[i*(len(df) // (k + 1)):]
+    shards = [df[i * (len(df) // (k + 1)):(i + 1) * (len(df) // (k + 1))] if i < k else df[i * (len(df) // (k + 1)):]
               for i in range(k + 1)]
     # test is always the last shard
     test, shards = shards[-1], shards[:-1]
@@ -207,11 +207,11 @@ def to_flow(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16):
 
 
 def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=4, seed=42,
-               class_mode='sparse'):
+               class_mode='sparse', center=False):
     if df is None:
         return None
 
-    def preprocess_image(item, target_shape):
+    def preprocess_image(item, target_shape, center=True):
         """
         Load in image from filename and resize to target shape.
         """
@@ -222,6 +222,8 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
         image = tf.io.decode_image(image_bytes)  # this line does not work kinda
         image = tf.image.convert_image_dtype(image, tf.float32)
         image = tf.image.resize(image, target_shape)
+        if center:
+            image = image - tf.reduce_mean(image)
 
         if class_mode == 'categorical':
             label = tf.one_hot(tf.strings.to_number(label, tf.dtypes.int32), 3, dtype=tf.float32)
@@ -235,24 +237,24 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
     df['class'] = df['class'].astype(str)
     slices = df.to_numpy()
     out_type = tf.int32 if class_mode == 'sparse' else tf.float32
-    # variable size element makes this impossible to convert to tensor???
+
     if shuffle:
         return tf.data.Dataset.from_tensor_slices(
             slices
-        ).cache().repeat().shuffle(len(slices), seed, True).map(lambda x:
-                                                        tf.py_function(func=preprocess_image,
-                                                                       inp=[x, image_size],
-                                                                       Tout=(tf.float32, out_type)),
-                                                        num_parallel_calls=tf.data.AUTOTUNE).batch(
+        ).shuffle(len(slices), seed, True).map(lambda x:
+                                               tf.py_function(func=preprocess_image,
+                                                              inp=[x, image_size, center],
+                                                              Tout=(tf.float32, out_type)),
+                                               num_parallel_calls=tf.data.AUTOTUNE).cache().repeat().batch(
             batch_size).prefetch(prefetch)
     else:
         return tf.data.Dataset.from_tensor_slices(
             slices
-        ).cache().repeat().map(lambda x:
-                       tf.py_function(func=preprocess_image,
-                                      inp=[x, image_size],
-                                      Tout=(tf.float32, out_type)),
-                       num_parallel_calls=tf.data.AUTOTUNE).batch(batch_size).prefetch(prefetch)
+        ).map(lambda x:
+              tf.py_function(func=preprocess_image,
+                             inp=[x, image_size],
+                             Tout=(tf.float32, out_type)),
+              num_parallel_calls=tf.data.AUTOTUNE).cache().repeat().batch(batch_size).prefetch(prefetch)
 
 
 def get_dataframes_self_train(train_dirlist, val_dirlist=None, train_fraction=.05):
