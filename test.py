@@ -105,9 +105,13 @@ if __name__ == "__main__":
             print('We have %d GPUs\n' % n_physical_devices)
         else:
             print('NO GPU')
+    from data_generator import cifar10_dset
+    from make_figure import explore_image_dataset
+    train, val, test = cifar10_dset()
 
-
-    prep_gpu(True)
+    explore_image_dataset(train, 8, 'f')
+    exit()
+    # prep_gpu(True)
 
     evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/', fbase='')
     for model in evaluator.models:

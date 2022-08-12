@@ -125,7 +125,7 @@ def execute_exp(args, model, train_dset, val_dset, network_fn, network_params, t
 def start_training(args, model, train_dset, val_dset, network_fn, network_params,
                    evaluate_on=None, train_steps=None, val_steps=None):
     """
-
+    TODO
     """
     # Override arguments if we are using exp_index
 
@@ -145,9 +145,9 @@ def start_training(args, model, train_dset, val_dset, network_fn, network_params
 
 
 def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df, image_size=(256, 256),
-               augment_fn=None, evaluate_on=None):
+               dataset_fn=None, evaluate_on=None):
     """
-
+    TODO
 
     """
     print('args', args)
@@ -168,8 +168,8 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
 
         model_data = start_training(args,
                                     model,
-                                    to_dataset(train_df, shuffle=True),
-                                    to_dataset(val_df),
+                                    dataset_fn(train_df, train=True),
+                                    dataset_fn(val_df),
                                     network_fn=network_fn,
                                     network_params=network_params,
                                     train_steps=args.steps_per_epoch,

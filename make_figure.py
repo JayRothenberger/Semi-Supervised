@@ -191,6 +191,7 @@ def explore_image_dataset(dset, num_images, fname=''):
             break
 
     for i, img in enumerate(imgs):
+        print(img.shape)
         img = Image.fromarray(np.uint8(img[0] * 255))
         with open(os.curdir + f'/../visualizations/perturbations/{i}_{fname}.jpg', 'wb') as fp:
             img.save(fp)

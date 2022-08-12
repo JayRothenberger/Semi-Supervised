@@ -16,9 +16,9 @@ import experiment
 from job_control import JobIterator
 from make_figure import *
 from data_structures import *
-from cnn_network import build_patchwise_vision_transformer
+from cnn_network import build_patchwise_vision_transformer, build_vision_transformer, build_axial_transformer
 from transforms import custom_rand_augment_object
-from data_generator import get_dataframes_self_train, to_dataset, get_cv_rotation, load_unlabeled
+from data_generator import get_dataframes_self_train, to_dataset, get_cv_rotation, load_unlabeled, cifar10_dset, cifar100_dset
 from experiment import start_training, self_train
 
 
@@ -127,15 +127,66 @@ def exp_type_to_hyperparameters(args):
             'train_iterations': [20],
             'train_fraction': [1],
             'epochs': [512],
-            'convex_dim': [1],
-            'convex_prob': [0],
+            'convex_dim': [2],
+            'convex_prob': [1.0],
             'steps_per_epoch': [512],
             'patience': [32],
             'batch': [48],
             'lrate': [1e-4],
             'randAugment': [False],
-            'peek': [True],
-            'convexAugment': [False]
+            'peek': [False],
+            'convexAugment': [False],
+            'cross_validate': [False],
+            'rand_M': [.1],
+            'rand_N': [2],
+        },
+        'cifar100': {
+            'filters': [[36, 64]],
+            'kernels': [[2, 1]],
+            'hidden': [[3, 3]],
+            'l1': [None],
+            'l2': [None],
+            'dropout': [0.1],
+            'train_iterations': [20],
+            'train_fraction': [1],
+            'epochs': [512],
+            'convex_dim': [2],
+            'convex_prob': [1.0],
+            'steps_per_epoch': [1024],
+            'patience': [32],
+            'batch': [128],
+            'lrate': [1e-3],
+            'randAugment': [False],
+            'peek': [False],
+            'convexAugment': [False],
+            'cross_validate': [False],
+            'rand_M': [.1],
+            'rand_N': [2],
+            'cfar': [True]
+        },
+        'cifar10': {
+            'filters': [[36, 64]],
+            'kernels': [[2, 1]],
+            'hidden': [[3, 3]],
+            'l1': [None],
+            'l2': [None],
+            'dropout': [0.1],
+            'train_iterations': [20],
+            'train_fraction': [1],
+            'epochs': [512],
+            'convex_dim': [2],
+            'convex_prob': [1.0],
+            'steps_per_epoch': [256],
+            'patience': [32],
+            'batch': [128],
+            'lrate': [1e-3],
+            'randAugment': [False],
+            'peek': [False],
+            'convexAugment': [False],
+            'cross_validate': [False],
+            'rand_M': [.1],
+            'rand_N': [2],
+            'cfar': [True]
         },
         'test': {
             'filters': [[36, 64]],
@@ -154,7 +205,7 @@ def exp_type_to_hyperparameters(args):
             'batch': [48],
             'lrate': [1e-4],
             'randAugment': [False],
-            'peek': [False],
+            'peek': [True],
             'convexAugment': [True],
             'cross_validate': [False],
             'rand_M': [.1],
@@ -346,8 +397,10 @@ def bc_plus(train_ds, prefetch=4):
     # create a dataset from which to get batches to blend
     dataset = train_ds.batch(2)
 
-    def random_weighting(n):
-        return rng.dirichlet([1 for i in range(n + 1)], 1)
+    def random_weighting(sigma_1, sigma_2):
+        p = rng.uniform(0, 1, 1)
+        p = 1 / (1 + ((sigma_1 / sigma_2) * ((1 - p) / p)))
+        return np.array([p, 1 - p])
 
     # the generator yields batches blended together with this weighting
     def blend(x, y):
@@ -356,12 +409,12 @@ def bc_plus(train_ds, prefetch=4):
           (convex hull of unit vectors)
         """
         # compute the weights for the combination
-        weights = random_weighting(2)
+        weights = random_weighting(tf.sqrt(tf.math.reduce_variance(x[0])), tf.sqrt(tf.math.reduce_variance(x[1])))
         weights *= float(1 / np.linalg.norm(weights))
-        weights = np.array(weights, dtype=np.double).reshape(-1, 1)
+        weights = np.array(weights, dtype=np.double)
+        # sum along the 0th dimension weighted by weights
         x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
         y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
-        x = x - tf.reduce_mean(x)
         # return the convex combination
         return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
 
@@ -372,7 +425,7 @@ def bc_plus(train_ds, prefetch=4):
     return dataset
 
 
-def my_mixup_dset(train_ds, n_blended=2, prefetch=4, alpha=.25):
+def generalized_bc_plus(train_ds, n_blended=2, prefetch=4, alpha=.25):
     """
     :param train_ds: dataset of batches to train on
     :param n_blended: number of examples to mix
@@ -391,6 +444,7 @@ def my_mixup_dset(train_ds, n_blended=2, prefetch=4, alpha=.25):
         return x + tf.random.normal(shape=x.shape, mean=0.0, stddev=std, dtype=tf.float32), y
 
     # create a dataset from which to get batches to blend
+    # add gaussian noise to each tensor
     dataset = train_ds.map(
         lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, .01], Tout=(tf.float32, tf.float32)),
         num_parallel_calls=tf.data.AUTOTUNE).batch(n_blended)
@@ -408,9 +462,9 @@ def my_mixup_dset(train_ds, n_blended=2, prefetch=4, alpha=.25):
         weights = random_weighting(n_blended)
         weights *= float(1 / np.linalg.norm(weights))
         weights = np.array(weights, dtype=np.double).reshape(-1, 1)
+        # sum along the 0th dimension weighted by weights
         x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
         y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
-        x = x - tf.reduce_mean(x)
         # return the convex combination
         return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
 
@@ -535,10 +589,77 @@ def generate_fname(args):
         str(time()).replace('.', '')[-6:])
 
 
-if __name__ == '__main__':
-    from data_generator import get_image_dsets
+def cifar(args, n_classes=10):
+    # TODO: cross-validation, distributed training
+    image_size, n_classes = (32, 32), n_classes
 
-    image_size = (256, 256)
+    network_params = {'learning_rate': args.lrate,
+                      'conv_filters': args.filters,
+                      'conv_size': args.kernels,
+                      'attention_heads': args.hidden,
+                      'image_size': (image_size[0], image_size[1], 3),
+                      'n_classes': n_classes,
+                      'l1': args.l1,
+                      'l2': args.l2,
+                      'dropout': args.dropout,
+                      'loss': 'categorical_crossentropy'}
+
+    print('hidden', args.hidden)
+    network_fn = build_axial_transformer
+
+    switch = {
+        10: cifar10_dset,
+        100: cifar100_dset
+    }
+
+    train_dset, val_dset, test_dset = switch.get(n_classes)(batch_size=args.batch)
+    # define our randAugment object
+    rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
+    # data augmentation strategy selection
+    if args.convexAugment and args.randAugment:
+        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                                    num_parallel_calls=tf.data.AUTOTUNE, )
+        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
+    elif args.convexAugment:
+        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
+    elif args.randAugment:
+        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                                    num_parallel_calls=tf.data.AUTOTUNE, )
+    else:
+        train_dset = bc_plus(train_dset, 8)
+
+    # peek at the dataset instead of training
+    if args.peek:
+        explore_image_dataset(train_dset, 8)
+        exit(-1)
+    # create the scope
+    # strategy = tf.distribute.MirroredStrategy()
+    # with strategy.scope():
+    # build the model (in the scope)
+    model = network_fn(**network_params)
+    # train the model
+    model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                                train_steps=args.steps_per_epoch, val_steps=10000 // args.batch)
+    # save the model
+    try:
+        with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+    except Exception as e:
+        print(e)
+        with open(f'./{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+
+
+def cifar10(args):
+    cifar(args, 10)
+
+
+def cifar100(args):
+    cifar(args, 100)
+
+
+def DOT_CV_self_train(args):
+    # TODO: cross-validation, distributed training, peeking
     # Parse and check incoming arguments
     parser = create_parser()
     args = parser.parse_args()
@@ -546,13 +667,15 @@ if __name__ == '__main__':
 
     prep_gpu(args.gpu, style=args.gpu_type)
 
+    image_size, n_classes = (256, 256), 3
+
     paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
              'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
              'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
 
     unlabeled_paths = [os.curdir + '/../unlabeled/']
 
-    # unlabeled_df = load_unlabeled(unlabeled_paths)
+    unlabeled_df = load_unlabeled(unlabeled_paths)
 
     print('getting dsets...')
     if args.cross_validate:
@@ -570,19 +693,71 @@ if __name__ == '__main__':
                       'conv_size': args.kernels,
                       'attention_heads': args.hidden,
                       'image_size': (image_size[0], image_size[1], 3),
-                      'n_classes': 3,
+                      'n_classes': n_classes,
                       'l1': args.l1,
                       'l2': args.l2,
                       'dropout': args.dropout,
                       'loss': 'categorical_crossentropy'}
 
-    print('hidden', args.hidden)
     network_fn = build_patchwise_vision_transformer
-    """
+
+    def dataset_fn(df, train=False):
+        ds = to_dataset(df, shuffle=True, image_size=image_size, batch_size=args.batch, prefetch=8, seed=42,
+                        class_mode='categorical')
+        if train:
+            # define our randAugment object
+            rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
+            # data augmentation strategy selection
+            if args.convexAugment and args.randAugment:
+                ds = ds.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                            num_parallel_calls=tf.data.AUTOTUNE, )
+                ds = generalized_bc_plus(ds, args.convex_dim, 8, args.convex_prob)
+            elif args.convexAugment:
+                ds = generalized_bc_plus(ds, args.convex_dim, 8, args.convex_prob)
+            elif args.randAugment:
+                ds = ds.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                            num_parallel_calls=tf.data.AUTOTUNE, )
+            else:
+                ds = bc_plus(ds, 8)
+
+        return ds
+
     self_train(args, network_fn, network_params, train_df, val_df, withheld_df,
-               augment_fn=custom_rand_augment_object(.1, 2, leq_M=False),
+               dataset_fn=custom_rand_augment_object(.1, 2, leq_M=False),
                evaluate_on=None)
-    """
+
+
+def DOT_CV(args):
+    image_size, n_classes = (256, 256), 3
+
+    paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
+             'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
+             'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
+
+    print('getting dsets...')
+    if args.cross_validate:
+        print(f'({args.cv_k}-fold) cross-validation rotation: {args.cv_rotation}')
+        train_df, withheld_df, val_df, test_df = get_cv_rotation(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction, k=args.cv_k, rotation=args.cv_rotation)
+    else:
+        train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction)
+
+    network_params = {'learning_rate': args.lrate,
+                      'conv_filters': args.filters,
+                      'conv_size': args.kernels,
+                      'attention_heads': args.hidden,
+                      'image_size': (image_size[0], image_size[1], 3),
+                      'n_classes': n_classes,
+                      'l1': args.l1,
+                      'l2': args.l2,
+                      'dropout': args.dropout,
+                      'loss': 'categorical_crossentropy'}
+
+    network_fn = build_patchwise_vision_transformer
+
     class_mode = network_params['loss'].split('_')[0]
     val_dset = to_dataset(val_df, shuffle=True, batch_size=args.batch, class_mode=class_mode)
     train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
@@ -591,19 +766,22 @@ if __name__ == '__main__':
     rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
     # data augmentation strategy selection
     if args.convexAugment and args.randAugment:
-        train_dset = blended_dset(train_df, args.batch, args.convex_dim, prob=args.convex_prob, std=.05) \
-            .map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
-                 num_parallel_calls=tf.data.AUTOTUNE, )
+        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                                    num_parallel_calls=tf.data.AUTOTUNE, )
+        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
     elif args.convexAugment:
-        train_dset = my_mixup_dset(train_dset, args.convex_dim, 8, args.convex_prob)
+        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
     elif args.randAugment:
         train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
                                     num_parallel_calls=tf.data.AUTOTUNE, )
+    else:
+        train_dset = bc_plus(train_dset, 8)
 
     # peek at the dataset instead of training
     if args.peek:
         explore_image_dataset(train_dset, 8)
         exit(-1)
+    # TODO: make a CLA for distributed training
     # create the scope
     # strategy = tf.distribute.MirroredStrategy()
     # with strategy.scope():
@@ -620,3 +798,22 @@ if __name__ == '__main__':
         print(e)
         with open(f'./{generate_fname(args)}', 'wb') as fp:
             pickle.dump(model_data, fp)
+
+
+if __name__ == '__main__':
+    # Parse and check incoming arguments
+    parser = create_parser()
+    args = parser.parse_args()
+    args, args_str = augment_args(args)
+
+    prep_gpu(args.gpu, style=args.gpu_type)
+
+    switch = {
+        'test': DOT_CV,
+        'cifar10': cifar10,
+        'cifar100': cifar100,
+        'control': DOT_CV
+    }
+
+    exp_fn = switch.get(args.exp_type)
+    exp_fn(args)

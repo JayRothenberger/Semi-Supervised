@@ -178,6 +178,124 @@ def get_cv_rotation(dirlist, rotation=0, k=5, train_fraction=1):
     return train, train_withheld, val, test
 
 
+def cifar100_dset(path='./../cifar-100/', batch_size=32, prefetch=8, center=True):
+    import pickle
+    with open(path + 'train', 'rb') as fo:
+        train = pickle.load(fo, encoding='bytes')
+    with open(path + 'test', 'rb') as fo:
+        test = pickle.load(fo, encoding='bytes')
+
+    def re_ravel(x):
+        return np.concatenate([np.reshape(x[i * 1024:(i + 1) * 1024], (32, 32, 1), 'C') for i in range(3)], axis=-1)
+
+    print(train.keys(), test.keys())
+    x_train = np.stack([re_ravel(i) for i in train[b'data']])
+    y_train = np.stack(train[b'fine_labels'])
+
+    x_test = np.stack([np.reshape(i, (32, 32, 3), 'F') for i in test[b'data']])
+    y_test = np.stack(test[b'fine_labels'])
+
+    x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=.2, shuffle=True, random_state=42)
+
+    train, val, test = tf.data.Dataset.from_tensor_slices((x_train, y_train)), \
+                       tf.data.Dataset.from_tensor_slices((x_val, y_val)), \
+                       tf.data.Dataset.from_tensor_slices((x_test, y_test))
+
+    def preprocess_image(x, y, center=True):
+        """
+        Load in image from filename and resize to target shape.
+        """
+
+        image = tf.image.convert_image_dtype(x, tf.float32)
+        if center:
+            image = image - tf.reduce_mean(image)
+
+        label = tf.one_hot(y, 100, dtype=tf.float32)
+
+        return image, label
+
+    train, val, test = train.map(
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           num_parallel_calls=tf.data.AUTOTUNE), \
+                       val.map(
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           num_parallel_calls=tf.data.AUTOTUNE), \
+                       test.map(
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           num_parallel_calls=tf.data.AUTOTUNE)
+
+    train, val, test = train.repeat().batch(batch_size).prefetch(prefetch), \
+                       val.repeat().batch(batch_size).prefetch(prefetch), \
+                       test.repeat().batch(batch_size).prefetch(prefetch)
+
+    return train, val, test
+
+
+def cifar10_dset(path='./../cifar-10/', batch_size=32, prefetch=8, center=True):
+    import pickle
+    train = []
+    with open(path + 'data_batch_1', 'rb') as fo:
+        train.append(pickle.load(fo, encoding='bytes'))
+    with open(path + 'data_batch_2', 'rb') as fo:
+        train.append(pickle.load(fo, encoding='bytes'))
+    with open(path + 'data_batch_3', 'rb') as fo:
+        train.append(pickle.load(fo, encoding='bytes'))
+    with open(path + 'data_batch_4', 'rb') as fo:
+        train.append(pickle.load(fo, encoding='bytes'))
+    with open(path + 'data_batch_5', 'rb') as fo:
+        val = pickle.load(fo, encoding='bytes')
+    with open(path + 'test_batch', 'rb') as fo:
+        test = pickle.load(fo, encoding='bytes')
+
+    def re_ravel(x):
+        return np.concatenate([np.reshape(x[i * 1024:(i + 1) * 1024], (32, 32, 1), 'C') for i in range(3)], axis=-1)
+
+    x_train, y_train = [], []
+
+    for batch in train:
+        x_train.append(np.stack([re_ravel(i) for i in batch[b'data']]))
+        y_train.append(np.stack(batch[b'labels']))
+    x_train, y_train = np.concatenate(x_train), np.concatenate(y_train)
+
+    x_test = np.stack([np.reshape(i, (32, 32, 3), 'F') for i in test[b'data']])
+    y_test = np.stack(test[b'labels'])
+
+    x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=.2, shuffle=True, random_state=42)
+
+    train, val, test = tf.data.Dataset.from_tensor_slices((x_train, y_train)), \
+                       tf.data.Dataset.from_tensor_slices((x_val, y_val)), \
+                       tf.data.Dataset.from_tensor_slices((x_test, y_test))
+
+    def preprocess_image(x, y, center=True):
+        """
+        Load in image from filename and resize to target shape.
+        """
+
+        image = tf.image.convert_image_dtype(x, tf.float32)
+        if center:
+            image = image - tf.reduce_mean(image)
+
+        label = tf.one_hot(y, 10, dtype=tf.float32)
+
+        return image, label
+
+    train, val, test = train.map(
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           num_parallel_calls=tf.data.AUTOTUNE), \
+                       val.map(
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           num_parallel_calls=tf.data.AUTOTUNE), \
+                       test.map(
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           num_parallel_calls=tf.data.AUTOTUNE)
+
+    train, val, test = train.repeat().batch(batch_size).prefetch(prefetch), \
+                       val.repeat().batch(batch_size).prefetch(prefetch), \
+                       test.repeat().batch(batch_size).prefetch(prefetch)
+
+    return train, val, test
+
+
 def load_unlabeled(dirlist):
     file_lists = []
     for directory in dirlist:
