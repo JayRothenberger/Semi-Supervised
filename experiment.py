@@ -9,7 +9,10 @@ import gc
 # model-related code I have written (supplied locally)
 from cnn_network import *
 from data_structures import ModelData
-from data_generator import augment_with_neighbors, to_dataset, to_flow
+from data_generator import augment_with_neighbors, to_dataset, cifar10_dset, cifar100_dset, blended_dset, bc_plus,\
+    generalized_bc_plus, load_unlabeled, get_cv_rotation, get_dataframes_self_train
+from transforms import custom_rand_augment_object
+from make_figure import explore_image_dataset
 
 
 def generate_fname(args):
@@ -125,7 +128,18 @@ def execute_exp(args, model, train_dset, val_dset, network_fn, network_params, t
 def start_training(args, model, train_dset, val_dset, network_fn, network_params,
                    evaluate_on=None, train_steps=None, val_steps=None):
     """
-    TODO
+    train a keras model on a dataset and evaluate it on other datasets then return the ModelData instance
+
+    :param args: Argparse args object from the CLA
+    :param model: keras model
+    :param train_dset: tf.data.Dataset for training
+    :param val_dset: tf.data.Dataset for evaluation
+    :param network_fn: function that was used to build the keras model
+    :param network_params: parameters passed to the function used to build the keras model
+    :param evaluate_on: a dictionary of finite objects passable to model.evaluate
+    :param train_steps: number of steps per epoch
+    :param val_steps: number of validations steps per epoch
+    :return: a ModelData instance
     """
     # Override arguments if we are using exp_index
 
@@ -147,7 +161,17 @@ def start_training(args, model, train_dset, val_dset, network_fn, network_params
 def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df, image_size=(256, 256),
                dataset_fn=None, evaluate_on=None):
     """
-    TODO
+    perform a self-training experiment
+
+    :param args: CLA
+    :param network_fn: function used to build the network
+    :param network_params: arguments to be passed to that function
+    :param train_df: training dataframe - image paths of training images
+    :param val_df: validation dataframe - image paths
+    :param unlabeled_df: unlabeled dataframe - image paths (does not try to infer a class directory)
+    :param image_size: (W, H)
+    :param dataset_fn: function used to construct the tf.data.Dataset the model will train on
+    :param evaluate_on: dictionary of items to pass to model.evaluate in the evaluation steps
 
     """
     print('args', args)
@@ -168,8 +192,8 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
 
         model_data = start_training(args,
                                     model,
-                                    dataset_fn(train_df, train=True),
-                                    dataset_fn(val_df),
+                                    dataset_fn(train_df, train=True, cache=args.cache),
+                                    dataset_fn(val_df, cache=args.cache),
                                     network_fn=network_fn,
                                     network_params=network_params,
                                     train_steps=args.steps_per_epoch,
@@ -177,11 +201,14 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
                                     evaluate_on=evaluate_on
                                     )
 
-        with open('%s/model_%s_%s_%s' % (args.results_path,
-                                         str(args.train_fraction),
-                                         str(train_iteration),
-                                         str(time())), 'wb') as fp:
-            pickle.dump(model_data, fp)
+        # save the model
+        try:
+            with open(f'{os.curdir}/../results/{train_iteration}_{generate_fname(args)}', 'wb') as fp:
+                pickle.dump(model_data, fp)
+        except Exception as e:
+            print(e)
+            with open(f'./{generate_fname(args)}_{train_iteration}', 'wb') as fp:
+                pickle.dump(model_data, fp)
 
         distance_function = dist_func_selector.get(args.distance_function)
 
@@ -208,3 +235,201 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
             print(f'stopped after {train_iteration} iterations!')
             break
         print('retraining: ', train_iteration)
+
+
+def cifar(args, n_classes=10):
+    # TODO: cross-validation
+    image_size, n_classes = (32, 32), n_classes
+
+    network_params = {'learning_rate': args.lrate,
+                      'conv_filters': args.filters,
+                      'conv_size': args.kernels,
+                      'attention_heads': args.hidden,
+                      'image_size': (image_size[0], image_size[1], 3),
+                      'n_classes': n_classes,
+                      'l1': args.l1,
+                      'l2': args.l2,
+                      'dropout': args.dropout,
+                      'loss': 'categorical_crossentropy'}
+
+    print('hidden', args.hidden)
+    network_fn = build_axial_transformer
+
+    switch = {
+        10: cifar10_dset,
+        100: cifar100_dset
+    }
+
+    train_dset, val_dset, test_dset = switch.get(n_classes)(batch_size=args.batch, cache=args.cache)
+    # define our randAugment object
+    rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
+    # data augmentation strategy
+    if args.randAugment:
+        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                                    num_parallel_calls=tf.data.AUTOTUNE, )
+    if args.convexAugment:
+        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
+    else:
+        train_dset = bc_plus(train_dset, 8)
+
+    # peek at the dataset instead of training
+    if args.peek:
+        explore_image_dataset(train_dset, 8)
+        exit(-1)
+    if args.distributed:
+        # create the scope
+        strategy = tf.distribute.MirroredStrategy()
+        with strategy.scope():
+            # build the model (in the scope)
+            model = network_fn(**network_params)
+    else:
+        model = network_fn(**network_params)
+    # train the model
+    model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                                train_steps=args.steps_per_epoch, val_steps=10000 // args.batch)
+    # save the model
+    try:
+        with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+    except Exception as e:
+        print(e)
+        with open(f'./{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+
+
+def cifar10(args):
+    cifar(args, 10)
+
+
+def cifar100(args):
+    cifar(args, 100)
+
+
+def DOT_CV_self_train(args):
+    # TODO: cross-validation, peeking
+    if args.peek:
+        raise NotImplementedError('peeking is not implemented for this experiment type')
+
+    image_size, n_classes = (256, 256), 3
+
+    paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
+             'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
+             'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
+
+    unlabeled_paths = [os.curdir + '/../unlabeled/']
+
+    unlabeled_df = load_unlabeled(unlabeled_paths)
+
+    print('getting dsets...')
+    if args.cross_validate:
+        print(f'({args.cv_k}-fold) cross-validation rotation: {args.cv_rotation}')
+        train_df, withheld_df, val_df, test_df = get_cv_rotation(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction, k=args.cv_k, rotation=args.cv_rotation)
+    else:
+        train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction)
+
+    network_params = {'learning_rate': args.lrate,
+                      'conv_filters': args.filters,
+                      'conv_size': args.kernels,
+                      'attention_heads': args.hidden,
+                      'image_size': (image_size[0], image_size[1], 3),
+                      'n_classes': n_classes,
+                      'l1': args.l1,
+                      'l2': args.l2,
+                      'dropout': args.dropout,
+                      'loss': 'categorical_crossentropy'}
+
+    network_fn = build_patchwise_vision_transformer
+
+    def dataset_fn(df, train=False, cache=True):
+        ds = to_dataset(df, shuffle=True, image_size=image_size, batch_size=args.batch, prefetch=8, seed=42,
+                        class_mode='categorical', cache=cache)
+        if train:
+            # define our randAugment object
+            rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
+            # data augmentation strategy
+            if args.randAugment:
+                ds = ds.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                            num_parallel_calls=tf.data.AUTOTUNE, )
+            if args.convexAugment:
+                ds = blended_dset(ds, args.convex_dim, 8, args.convex_prob, .05)
+
+        return ds
+
+    self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
+               dataset_fn=dataset_fn,
+               evaluate_on=None)
+
+
+def DOT_CV(args):
+    image_size, n_classes = (256, 256), 3
+
+    paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
+             'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
+             'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
+
+    print('getting dsets...')
+    if args.cross_validate:
+        print(f'({args.cv_k}-fold) cross-validation rotation: {args.cv_rotation}')
+        train_df, withheld_df, val_df, test_df = get_cv_rotation(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction, k=args.cv_k, rotation=args.cv_rotation)
+    else:
+        train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction)
+
+    network_params = {'learning_rate': args.lrate,
+                      'conv_filters': args.filters,
+                      'conv_size': args.kernels,
+                      'attention_heads': args.hidden,
+                      'image_size': (image_size[0], image_size[1], 3),
+                      'n_classes': n_classes,
+                      'l1': args.l1,
+                      'l2': args.l2,
+                      'dropout': args.dropout,
+                      'loss': 'categorical_crossentropy'}
+
+    network_fn = build_patchwise_vision_transformer
+
+    val_dset = to_dataset(val_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
+                          class_mode='categorical', center=True, cache=args.cache)
+    train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
+                            class_mode='categorical', center=True, cache=args.cache)
+
+    # define our randAugment object
+    rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
+    # data augmentation strategy
+    if args.randAugment:
+        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                                    num_parallel_calls=tf.data.AUTOTUNE, )
+    if args.convexAugment:
+        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
+    else:
+        train_dset = bc_plus(train_dset, 8)
+    # peek at the dataset instead of training
+    if args.peek:
+        explore_image_dataset(train_dset, 8)
+        exit(-1)
+    if args.distributed:
+        # create the scope
+        strategy = tf.distribute.MirroredStrategy()
+        with strategy.scope():
+            # build the model (in the scope)
+            model = network_fn(**network_params)
+    else:
+        model = network_fn(**network_params)
+    # train the model
+    model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                                train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
+    # save the model
+    try:
+        with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+    except Exception as e:
+        print(e)
+        with open(f'./{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)

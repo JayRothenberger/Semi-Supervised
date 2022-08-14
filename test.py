@@ -105,15 +105,9 @@ if __name__ == "__main__":
             print('We have %d GPUs\n' % n_physical_devices)
         else:
             print('NO GPU')
-    from data_generator import cifar10_dset
-    from make_figure import explore_image_dataset
-    train, val, test = cifar10_dset()
+    prep_gpu(True)
 
-    explore_image_dataset(train, 8, 'f')
-    exit()
-    # prep_gpu(True)
-
-    evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/', fbase='')
+    evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/self-train/', fbase='')
     for model in evaluator.models:
         break
         print(model.args)
@@ -130,6 +124,6 @@ if __name__ == "__main__":
                        [1e-4, 1e-3, 1e-2, 1e-1], steps=12
                        )
 
-    for metric, name in [('loss', 'Loss'), ('categorical_accuracy', 'Accuracy')]:
-        figure_metric_epoch(evaluator, f'{name} With / Without Augmentation',
-                            os.curdir + '/../visualizations/' + f'{metric}test.png', metric)
+    for metric, name in [('loss', 'Validation Loss'), ('categorical_accuracy', 'Validation Accuracy')]:
+        figure_metric_epoch(evaluator, f'{name}',
+                            os.curdir + '/../visualizations/' + f'{metric}_test.png', metric)

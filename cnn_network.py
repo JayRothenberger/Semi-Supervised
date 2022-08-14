@@ -7,7 +7,7 @@ Jay Rothenberger (jay.c.rothenberger@ou.edu)
 
 import tensorflow as tf
 from tensorflow.keras.layers import Flatten, Conv2D, MaxPooling2D, Dense, Input, Concatenate, Dropout, SpatialDropout2D, \
-    MultiHeadAttention, Add
+    MultiHeadAttention, Add, BatchNormalization
 from time import time
 from inception import *
 
@@ -37,24 +37,25 @@ def build_axial_transformer(conv_filters,
     # set reference x separately to keep track of the input layer
     import math
     layers = max(int(math.log(image_size[0], 4)), int(math.log(image_size[1], 4)))
-    lense_filters = 3 * x.shape[-1] * layers
+    lense_filters = 4 * x.shape[-1] * layers
     for layer in range(layers + 3):
         # here we keep track of the input of each block
-        x = Conv2D(filters=lense_filters, kernel_size=(4, 4), **conv_params, padding='same')(x)
+        x = Conv2D(filters=lense_filters, kernel_size=(4, 4), **conv_params, padding='same', activation=activation)(x)
 
     # construct the convolutional block
     for (filters, kernel) in zip(conv_filters, conv_size):
         # here we keep track of the input of each block
         x = Conv2D(filters=filters, kernel_size=(kernel, kernel), strides=(kernel, kernel), activation=activation,
-                   **conv_params)(x)
+                   **conv_params, padding='same')(x)
 
     print(attention_heads)
     for i, heads in enumerate(attention_heads):
         skip = x
         # for all layers except the last one, we return sequences
-        key_dim = value_dim = max(x.shape[1], x.shape[-1] // 4)
+        key_dim = value_dim = max(x.shape[1], x.shape[-1] // 2)
         if i == len(attention_heads) - 1:
             # at the last layer of attention set the output to be a vector instead of a matrix
+            x = BatchNormalization()(x)
             x = MultiHeadAttention(heads,
                                    key_dim,
                                    value_dim,
@@ -64,6 +65,7 @@ def build_axial_transformer(conv_filters,
             x = Concatenate()([skip, x])
             x = Conv2D(filters=2, kernel_size=(1, 1), **conv_params, activation=activation)(x)
         else:
+            x = BatchNormalization()(x)
             x = MultiHeadAttention(heads,
                                    key_dim,
                                    value_dim,
@@ -71,7 +73,8 @@ def build_axial_transformer(conv_filters,
                                    kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
                                    dropout=dropout)(x, x)
             x = Concatenate()([skip, x])
-            x = Conv2D(filters=key_dim, kernel_size=(1, 1), **conv_params, activation=activation)(x)
+            x = Conv2D(filters=max(x.shape[1], x.shape[-1] // 2), kernel_size=(1, 1), **conv_params,
+                       activation=activation)(x)
 
     x = Flatten()(x)
 

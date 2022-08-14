@@ -5,7 +5,6 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from time import perf_counter as perf_time
-from transforms import rand_augment_object
 
 # I included this because when I didn't I got an error.
 from PIL import Image, ImageFile
@@ -178,7 +177,7 @@ def get_cv_rotation(dirlist, rotation=0, k=5, train_fraction=1):
     return train, train_withheld, val, test
 
 
-def cifar100_dset(path='./../cifar-100/', batch_size=32, prefetch=8, center=True):
+def cifar100_dset(path='./../cifar-100/', batch_size=32, prefetch=8, center=True, cache=True):
     import pickle
     with open(path + 'train', 'rb') as fo:
         train = pickle.load(fo, encoding='bytes')
@@ -215,14 +214,19 @@ def cifar100_dset(path='./../cifar-100/', batch_size=32, prefetch=8, center=True
         return image, label
 
     train, val, test = train.map(
-                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
-                           num_parallel_calls=tf.data.AUTOTUNE), \
+        lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE), \
                        val.map(
-                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center],
+                                                       Tout=(tf.float32, tf.float32)),
                            num_parallel_calls=tf.data.AUTOTUNE), \
                        test.map(
-                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center],
+                                                       Tout=(tf.float32, tf.float32)),
                            num_parallel_calls=tf.data.AUTOTUNE)
+
+    if cache:
+        train, val, test = train.cache(), val.cache(), test.cache()
 
     train, val, test = train.repeat().batch(batch_size).prefetch(prefetch), \
                        val.repeat().batch(batch_size).prefetch(prefetch), \
@@ -231,7 +235,7 @@ def cifar100_dset(path='./../cifar-100/', batch_size=32, prefetch=8, center=True
     return train, val, test
 
 
-def cifar10_dset(path='./../cifar-10/', batch_size=32, prefetch=8, center=True):
+def cifar10_dset(path='./../cifar-10/', batch_size=32, prefetch=8, center=True, cache=True):
     import pickle
     train = []
     with open(path + 'data_batch_1', 'rb') as fo:
@@ -280,14 +284,19 @@ def cifar10_dset(path='./../cifar-10/', batch_size=32, prefetch=8, center=True):
         return image, label
 
     train, val, test = train.map(
-                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
-                           num_parallel_calls=tf.data.AUTOTUNE), \
+        lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE), \
                        val.map(
-                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center],
+                                                       Tout=(tf.float32, tf.float32)),
                            num_parallel_calls=tf.data.AUTOTUNE), \
                        test.map(
-                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center], Tout=(tf.float32, tf.float32)),
+                           lambda x, y: tf.py_function(preprocess_image, inp=[x, y, center],
+                                                       Tout=(tf.float32, tf.float32)),
                            num_parallel_calls=tf.data.AUTOTUNE)
+
+    if cache:
+        train, val, test = train.cache(), val.cache(), test.cache()
 
     train, val, test = train.repeat().batch(batch_size).prefetch(prefetch), \
                        val.repeat().batch(batch_size).prefetch(prefetch), \
@@ -325,7 +334,7 @@ def to_flow(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16):
 
 
 def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=4, seed=42,
-               class_mode='sparse', center=False):
+               class_mode='sparse', center=False, cache=True):
     if df is None:
         return None
 
@@ -357,22 +366,26 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
     out_type = tf.int32 if class_mode == 'sparse' else tf.float32
 
     if shuffle:
-        return tf.data.Dataset.from_tensor_slices(
+        ds = tf.data.Dataset.from_tensor_slices(
             slices
         ).shuffle(len(slices), seed, True).map(lambda x:
                                                tf.py_function(func=preprocess_image,
                                                               inp=[x, image_size, center],
                                                               Tout=(tf.float32, out_type)),
-                                               num_parallel_calls=tf.data.AUTOTUNE).cache().repeat().batch(
-            batch_size).prefetch(prefetch)
+                                               num_parallel_calls=tf.data.AUTOTUNE)
     else:
-        return tf.data.Dataset.from_tensor_slices(
+        ds = tf.data.Dataset.from_tensor_slices(
             slices
         ).map(lambda x:
               tf.py_function(func=preprocess_image,
                              inp=[x, image_size],
                              Tout=(tf.float32, out_type)),
-              num_parallel_calls=tf.data.AUTOTUNE).cache().repeat().batch(batch_size).prefetch(prefetch)
+              num_parallel_calls=tf.data.AUTOTUNE)
+
+    if cache:
+        ds = ds.cache()
+
+    return ds.repeat().batch(batch_size).prefetch(prefetch)
 
 
 def get_dataframes_self_train(train_dirlist, val_dirlist=None, train_fraction=.05):
@@ -415,10 +428,8 @@ def augment_with_neighbors(args, model, image_size, image_gen, distance_fn, labe
     :param sample: float or None fraction of available labeled data to use to calculate the nearest neighbors.
                    If None, uses all of the data.
     :param pseudo_relabel: the teacher assign new pseudo-labels to each unlabeled point at each iteration
-    :return: train_gen, withheld_gen, train, withheld
+    :return: pseudolabeled_df, labeled_df, withheld_df
     """
-    unlabeled_data_gen = to_flow(unlabeled_data, shuffle=False, batch_size=args.batch, image_size=image_size,
-                                 image_gen=image_gen)
     if args.augment_batch > len(unlabeled_data):
         raise ValueError('Not enough unlabeled data to augment with')
 
@@ -428,6 +439,12 @@ def augment_with_neighbors(args, model, image_size, image_gen, distance_fn, labe
     if sample is None:
         sample = 1
 
+    unlabeled_sample = unlabeled_data.iloc[
+        np.random.choice(range(len(unlabeled_data)),
+                         sample * int(len(unlabeled_data)), replace=False)]
+
+    unlabeled_dataset = to_dataset(unlabeled_sample, shuffle=False, image_size=image_size, batch_size=args.batch)
+
     # compute the distance between every image pair
     distances = []
     # pre-loading examples from disk
@@ -435,12 +452,12 @@ def augment_with_neighbors(args, model, image_size, image_gen, distance_fn, labe
     start = perf_time()
 
     # retrieve top-1 confidence for each prediction on the unlabeled data
-    top_1 = np.max(model.predict(unlabeled_data_gen), axis=1)
+    top_1 = np.max(model.predict(unlabeled_dataset, steps=len(unlabeled_sample) // args.batch), axis=1)
     # this list holds (enumerate_index, (df_index, unlabeled_image_tensor)) elements (unlabeled images)
     ulab_img_array = [(i,
                        tf.keras.preprocessing.image.img_to_array(
                            tf.keras.preprocessing.image.load_img(unlabeled['filepath'], target_size=image_size)))
-                      for i, (j, unlabeled) in enumerate(unlabeled_data.iterrows())]
+                      for i, (j, unlabeled) in enumerate(unlabeled_sample.iterrows())]
 
     print(f'loaded unlabeled images ({image_size}): ', perf_time() - start)
     start = perf_time()
@@ -452,18 +469,12 @@ def augment_with_neighbors(args, model, image_size, image_gen, distance_fn, labe
     lab_img_array = [(i,
                       tf.keras.preprocessing.image.img_to_array(
                           tf.keras.preprocessing.image.load_img(labeled['filepath'], target_size=image_size)))
-                     for i, (j, labeled) in enumerate(
-            labeled_data.iloc[
-                np.random.choice(range(len(labeled_data)),
-                                 int(sample * len(labeled_data)), replace=False)].iterrows())] \
+                     for i, (j, labeled) in enumerate(labeled_data.iterrows())] \
         if args.closest_to_labeled else [(i,
                                           tf.keras.preprocessing.image.img_to_array(
                                               tf.keras.preprocessing.image.load_img(labeled['filepath'],
                                                                                     target_size=image_size)))
-                                         for i, (j, labeled) in enumerate(
-            pseudolabeled_data.iloc[
-                np.random.choice(range(len(labeled_data)),
-                                 int(sample * len(labeled_data)), replace=False)].iterrows())]
+                                         for i, (j, labeled) in enumerate(pseudolabeled_data.iterrows())]
 
     print(f'loaded labeled images ({image_size}): ', perf_time() - start)
     # now we have loaded two arrays of image tensors
@@ -505,15 +516,13 @@ def augment_with_neighbors(args, model, image_size, image_gen, distance_fn, labe
         pseudo_labeled_batch = pd.concat([df_difference(pseudolabeled_data, labeled_data), pseudo_labeled_batch],
                                          ignore_index=True)
 
-    pseudo_labeled_batch_gen = to_flow(pseudo_labeled_batch, shuffle=False, batch_size=args.batch,
-                                       image_size=image_size,
-                                       image_gen=image_gen)
+    pseudo_labeled_batch_gen = to_dataset(pseudo_labeled_batch, shuffle=False, image_size=image_size, batch_size=args.batch)
 
     # set the classes as the pseudo-labels
     if hard_labels:
-        pseudo_labels = np.argmax(model.predict(pseudo_labeled_batch_gen), axis=1)
+        pseudo_labels = np.argmax(model.predict(pseudo_labeled_batch_gen, steps=len(pseudo_labeled_batch) // args.batch), axis=1)
     else:
-        pseudo_labels = model.predict(pseudo_labeled_batch_gen)
+        pseudo_labels = model.predict(pseudo_labeled_batch_gen, steps=len(pseudo_labeled_batch) // args.batch)
     # set the assign the pseudo-labels
     pseudo_labeled_batch['class'] = pseudo_labels
     pseudo_labeled_batch['class'] = pseudo_labeled_batch['class'].astype(str)
@@ -529,44 +538,189 @@ def augment_with_neighbors(args, model, image_size, image_gen, distance_fn, labe
     return pseudolabeled_data, unlabeled_data, labeled_data
 
 
-def get_image_dsets(data_paths, path_prefix, image_size=(256, 256), batch_size=16, prefetch=3, augment_fn=None,
-                    augment_args=None, train_fraction=None):
+def blended_dset(train_ds, n_blended=2, prefetch=4, prob=None, std=.1):
     """
-
-
+    :param train_ds: dataset of training images
+    :param batch_size: size of batches to return from the generator
+    :param n_blended: number of examples to blend together
+    :param image_size: shape of the input image tensor
+    :param prefetch: number of examples to pre fetch from disk
+    :param prob: probability of repacing a training batch with a convex combination of n_blended
+    :param std: standard deviation of (mean 0) gaussian noise to add to images before blending
+                (0.0 or equivalently None for no noise)
     """
-    # path_prefix = CURRDIR + '/../data/'
-    # the path string to the data directory relative to this file
-    data_paths = [path_prefix + f for f in data_paths]
+    # what if we take elements in our dataset and blend them together and predict the mean label?
 
-    train, withheld, val, test, image_gen = get_dataframes_self_train(data_paths,
-                                                                      image_size=image_size,
-                                                                      batch_size=batch_size,
-                                                                      train_fraction=train_fraction)
+    prob = prob if prob is not None else 1.0
+    std = float(std) if std is not None else 0.0
 
-    augment_args = augment_args if isinstance(augment_args, dict) else dict()
+    def add_gaussian_noise(x, y, std=1.0):
+        return x + tf.random.normal(shape=x.shape, mean=0.0, stddev=std, dtype=tf.float32), y
 
-    train_process = ImageDataGenerator(rescale=1. / 255,
-                                       preprocessing_function=augment_fn(**augment_args))
-    # convert dataframes to flow
-    train_gen, withheld_gen, val_gen, test_gen = to_flow(train,
-                                                         train_process,
-                                                         shuffle=True, image_size=image_size, batch_size=batch_size), \
-                                                 to_flow(withheld,
-                                                         image_gen,
-                                                         shuffle=False, image_size=image_size, batch_size=batch_size), \
-                                                 to_flow(val,
-                                                         image_gen,
-                                                         shuffle=False, image_size=image_size, batch_size=batch_size), \
-                                                 to_flow(test,
-                                                         image_gen,
-                                                         shuffle=False, image_size=image_size, batch_size=batch_size)
+    # create a dataset from which to get batches to blend
+    dataset = train_ds.map(
+        lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, std], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE).batch(n_blended)
 
-    # convert flows to datasets... (CANNOT have the same name as the flow)
-    train_dset = tf.data.Dataset.from_generator(lambda: train_gen, output_types=(tf.float32, tf.int32),
-                                                output_shapes=([None, 256, 256, 3], [None, ])).prefetch(prefetch)
+    def random_weighting(n):
+        # get a random weighting chosen uniformly from the convex hull of the unit vectors.
+        samp = -1 * np.log(np.random.uniform(0, 1, n))
+        samp /= np.sum(samp)
+        return np.array(samp)
 
-    val_dset = tf.data.Dataset.from_generator(lambda: val_gen, output_types=(tf.float32, tf.int32),
-                                              output_shapes=([None, 256, 256, 3], [None, ])).prefetch(prefetch)
+    # the generator yields batches blended together with this weighting
+    def blend(x, y):
+        """
+         sum a batch along the batch dimension weighted by a uniform random vector from the n simplex
+          (convex hull of unit vectors)
+        """
+        if prob < np.random.uniform(0, 1, 1):
+            return x[0], y[0]
+        # compute the weights for the combination
+        weights = random_weighting(n_blended)
+        weights *= float(1 / np.linalg.norm(weights))
+        weights = np.array(weights, dtype=np.double).reshape(-1, 1)
+        # sum along the 0th dimension weighted by weights
+        x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
+        y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
+        # return the convex combination
+        return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
 
-    return train_dset, val_dset
+    # map the dataset with the blend function
+    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
+
+    return dataset
+
+
+def mixup_dset(train_ds, prefetch=4, alpha=None):
+    """
+    :param train_ds: dataset of batches to train on
+    :param prefetch: number of examples to pre fetch from disk
+    :param alpha: Dirichlet parameter.  Weights are drawn from Dirichlet(alpha, ..., alpha) for combining two examples.
+                    Empirically choose a value in [.1, .4]
+    :return: a dataset
+    """
+    # what if we take elements in our dataset and blend them together and predict the mean label?
+
+    alpha = alpha if alpha is not None else 1.0
+
+    rng = np.random.default_rng()
+
+    # create a dataset from which to get batches to blend
+    dataset = train_ds.batch(2)
+
+    def random_weighting(n):
+        return rng.dirichlet([alpha for i in range(n + 1)], 1)
+
+    # the generator yields batches blended together with this weighting
+    def blend(x, y):
+        """
+         sum a batch along the batch dimension weighted by a uniform random vector from the n-1 simplex
+          (convex hull of unit vectors)
+        """
+        # compute the weights for the combination
+        weights = random_weighting(2)
+        # return the convex combination
+        return tf.reduce_sum(np.array([weight * ex for ex, weight in zip(x, weights)]), axis=0), \
+               tf.reduce_sum(np.array([weight * tf.cast(ex, tf.float32) for ex, weight in zip(y, weights)]),
+                             axis=0)
+
+    # map the dataset with the blend function
+    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
+
+    return dataset
+
+
+def bc_plus(train_ds, prefetch=4):
+    """
+    :param train_ds: dataset of batches to train on
+    :param prefetch: number of examples to pre fetch from disk
+    :param alpha: Dirichlet parameter.  Weights are drawn from Dirichlet(alpha, ..., alpha) for combining two examples.
+                    Empirically choose a value in [.1, .4]
+    :return: a dataset
+    """
+    # what if we take elements in our dataset and blend them together and predict the mean label?
+
+    rng = np.random.default_rng()
+
+    # create a dataset from which to get batches to blend
+    dataset = train_ds.batch(2)
+
+    def random_weighting(sigma_1, sigma_2):
+        p = rng.uniform(0, 1, 1)
+        p = 1 / (1 + ((sigma_1 / sigma_2) * ((1 - p) / p)))
+        return np.array([p, 1 - p])
+
+    # the generator yields batches blended together with this weighting
+    def blend(x, y):
+        """
+         sum a batch along the batch dimension weighted by a uniform random vector from the n simplex
+          (convex hull of unit vectors)
+        """
+        # compute the weights for the combination
+        weights = random_weighting(tf.sqrt(tf.math.reduce_variance(x[0])), tf.sqrt(tf.math.reduce_variance(x[1])))
+        weights *= float(1 / np.linalg.norm(weights))
+        weights = np.array(weights, dtype=np.double)
+        # sum along the 0th dimension weighted by weights
+        x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
+        y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
+        # return the convex combination
+        return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
+
+    # map the dataset with the blend function
+    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
+
+    return dataset
+
+
+def generalized_bc_plus(train_ds, n_blended=2, prefetch=4, alpha=.25):
+    """
+    :param train_ds: dataset of batches to train on
+    :param n_blended: number of examples to mix
+    :param prefetch: number of examples to pre fetch from disk
+    :param alpha: Dirichlet parameter.  Weights are drawn from Dirichlet(alpha, ..., alpha) for combining two examples.
+                    Empirically choose a value in [.1, .4]
+    :return: a dataset
+    """
+    # what if we take elements in our dataset and blend them together and predict the mean label?
+
+    alpha = alpha if alpha is not None else 1.0
+
+    rng = np.random.default_rng()
+
+    def add_gaussian_noise(x, y, std=0.01):
+        return x + tf.random.normal(shape=x.shape, mean=0.0, stddev=std, dtype=tf.float32), y
+
+    # create a dataset from which to get batches to blend
+    # add gaussian noise to each tensor
+    dataset = train_ds.map(
+        lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, .05], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE).batch(n_blended)
+
+    def random_weighting(n):
+        return rng.dirichlet(tuple([alpha for i in range(n)]), 1)
+
+    # the generator yields batches blended together with this weighting
+    def blend(x, y):
+        """
+         sum a batch along the batch dimension weighted by a uniform random vector from the n simplex
+          (convex hull of unit vectors)
+        """
+        # compute the weights for the combination
+        weights = random_weighting(n_blended)
+        weights *= float(1 / np.linalg.norm(weights))
+        weights = np.array(weights, dtype=np.double).reshape(-1, 1)
+        # sum along the 0th dimension weighted by weights
+        x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
+        y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
+        # return the convex combination
+        return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
+
+    # map the dataset with the blend function
+    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
+
+    return dataset

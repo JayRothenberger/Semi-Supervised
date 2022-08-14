@@ -3,23 +3,13 @@ Experiment Management Code by Jay Rothenberger (jay.c.rothenberger@ou.edu)
 """
 
 # code supplied by pip / conda
-import os
 import argparse
 
-import matplotlib.pyplot as plt
-import gc
-from time import time
-import numpy as np
-
 # code supplied locally
-import experiment
 from job_control import JobIterator
 from make_figure import *
 from data_structures import *
-from cnn_network import build_patchwise_vision_transformer, build_vision_transformer, build_axial_transformer
-from transforms import custom_rand_augment_object
-from data_generator import get_dataframes_self_train, to_dataset, get_cv_rotation, load_unlabeled, cifar10_dset, cifar100_dset
-from experiment import start_training, self_train
+from experiment import cifar10, cifar100, DOT_CV, DOT_CV_self_train
 
 
 def create_parser():
@@ -39,6 +29,7 @@ def create_parser():
     parser.add_argument('--gpu', action='store_true', help='Use a GPU')
     parser.add_argument('--cpus_per_task', type=int, default=None, help='number of cpus per task available to the job')
     parser.add_argument('--gpu_type', type=str, default="a100", help="a100 or v100 type of gpu training on")
+    parser.add_argument('--distributed', action='store_true', help='Use multiple GPUs')
 
     # High-level experiment configuration
     parser.add_argument('--label', type=str, default="", help="Experiment label")
@@ -48,6 +39,7 @@ def create_parser():
                                                                    ' rotation of cross-validation to execute')
     parser.add_argument('--cv_k', type=int, default=4, help='positive int - number of rotations of cross-validation')
     parser.add_argument('--cross_validate', action='store_true', help='Perform k-fold cross-validation')
+    parser.add_argument('--cache', action='store_true', help='cache the dataset in memory')
 
     # Semi-supervised parameters
     parser.add_argument('--train_fraction', type=float, default=0.05, help="fraction of available training data to use")
@@ -140,6 +132,30 @@ def exp_type_to_hyperparameters(args):
             'rand_M': [.1],
             'rand_N': [2],
         },
+        'self_train': {
+            'filters': [[36, 64]],
+            'kernels': [[4, 1]],
+            'hidden': [[3, 3]],
+            'l1': [None],
+            'l2': [None],
+            'dropout': [0.1],
+            'train_iterations': [20],
+            'train_fraction': [1],
+            'epochs': [50],  # TODO
+            'convex_dim': [2],
+            'convex_prob': [.75],
+            'steps_per_epoch': [512],
+            'patience': [4],  # TODO
+            'batch': [20],  # TODO
+            'augment_batch': [2048],
+            'lrate': [1e-4],
+            'randAugment': [True],
+            'peek': [False],
+            'convexAugment': [True],
+            'cross_validate': [False],
+            'rand_M': [.1],
+            'rand_N': [2],
+        },
         'cifar100': {
             'filters': [[36, 64]],
             'kernels': [[2, 1]],
@@ -151,7 +167,7 @@ def exp_type_to_hyperparameters(args):
             'train_fraction': [1],
             'epochs': [512],
             'convex_dim': [2],
-            'convex_prob': [1.0],
+            'convex_prob': [.25],
             'steps_per_epoch': [1024],
             'patience': [32],
             'batch': [128],
@@ -165,9 +181,9 @@ def exp_type_to_hyperparameters(args):
             'cfar': [True]
         },
         'cifar10': {
-            'filters': [[36, 64]],
+            'filters': [[96, 96]],
             'kernels': [[2, 1]],
-            'hidden': [[3, 3]],
+            'hidden': [[8, 8, 8]],
             'l1': [None],
             'l2': [None],
             'dropout': [0.1],
@@ -175,14 +191,14 @@ def exp_type_to_hyperparameters(args):
             'train_fraction': [1],
             'epochs': [512],
             'convex_dim': [2],
-            'convex_prob': [1.0],
+            'convex_prob': [.5],
             'steps_per_epoch': [256],
             'patience': [32],
             'batch': [128],
-            'lrate': [1e-3],
-            'randAugment': [False],
+            'lrate': [2e-4],
+            'randAugment': [True],
             'peek': [False],
-            'convexAugment': [False],
+            'convexAugment': [True],
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
@@ -205,7 +221,7 @@ def exp_type_to_hyperparameters(args):
             'batch': [48],
             'lrate': [1e-4],
             'randAugment': [False],
-            'peek': [True],
+            'peek': [False],
             'convexAugment': [True],
             'cross_validate': [False],
             'rand_M': [.1],
@@ -282,197 +298,6 @@ def prep_gpu(gpu=False, style='a100'):
         print('We have %d GPUs\n' % n_physical_devices)
     else:
         print('NO GPU')
-
-
-def blended_dset(train_df, batch_size=16, n_blended=2, image_size=(256, 256, 3), prefetch=4, prob=None, std=.1):
-    """
-    :param train_df: dataframe of training image paths
-    :param batch_size: size of batches to return from the generator
-    :param n_blended: number of examples to blend together
-    :param image_size: shape of the input image tensor
-    :param prefetch: number of examples to pre fetch from disk
-    :param prob: probability of repacing a training batch with a convex combination of n_blended
-    :param std: standard deviation of (mean 0) gaussian noise to add to images before blending
-                (0.0 or equivalently None for no noise)
-    """
-    # what if we take elements in our dataset and blend them together and predict the mean label?
-
-    prob = prob if prob is not None else 1.0
-    std = float(std) if std is not None else 0.0
-
-    def add_gaussian_noise(x, y, std=1.0):
-        return x + tf.random.normal(shape=x.shape, mean=0.0, stddev=std, dtype=tf.float32), y
-
-    # create a dataset from which to get batches to blend
-    dataset = to_dataset(train_df, shuffle=True, batch_size=batch_size, seed=42, prefetch=n_blended,
-                         class_mode='categorical').map(
-        lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, std], Tout=(tf.float32, tf.float32)),
-        num_parallel_calls=tf.data.AUTOTUNE).batch(n_blended)
-
-    def random_weighting(n):
-        # get a random weighting chosen uniformly from the convex hull of the unit vectors.
-        samp = -1 * np.log(np.random.uniform(0, 1, n))
-        samp /= np.sum(samp)
-        return np.array(samp)
-
-    # the generator yields batches blended together with this weighting
-    def blend(x, y):
-        """
-         sum a batch along the batch dimension weighted by a uniform random vector from the n-1 simplex
-          (convex hull of unit vectors)
-        """
-        if np.random.uniform(0, 1, 1) > prob:
-            return np.array([ex for ex in x][0]), np.array([ex for ex in y][0]).astype(np.float32)
-        # compute the weights for the combination
-        weights = random_weighting(n_blended)
-        # yield the convex combination
-        try:
-            return tf.reduce_sum(np.array([weight * ex for ex, weight in zip(x, weights)]), axis=0), \
-                   tf.reduce_sum(np.array([weight * tf.cast(ex, tf.float32) for ex, weight in zip(y, weights)]),
-                                 axis=0)
-        except ValueError as e:
-            # sometimes (infrequently) our batches differ in size and cannot be stacked or meaned, we just need
-            # to retry
-            print(e)
-
-    # map the dataset with the blend function
-    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
-                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
-
-    return dataset
-
-
-def mixup_dset(train_ds, prefetch=4, alpha=None):
-    """
-    :param train_ds: dataset of batches to train on
-    :param prefetch: number of examples to pre fetch from disk
-    :param alpha: Dirichlet parameter.  Weights are drawn from Dirichlet(alpha, ..., alpha) for combining two examples.
-                    Empirically choose a value in [.1, .4]
-    :return: a dataset
-    """
-    # what if we take elements in our dataset and blend them together and predict the mean label?
-
-    alpha = alpha if alpha is not None else 1.0
-
-    rng = np.random.default_rng()
-
-    # create a dataset from which to get batches to blend
-    dataset = train_ds.batch(2)
-
-    def random_weighting(n):
-        return rng.dirichlet([alpha for i in range(n + 1)], 1)
-
-    # the generator yields batches blended together with this weighting
-    def blend(x, y):
-        """
-         sum a batch along the batch dimension weighted by a uniform random vector from the n-1 simplex
-          (convex hull of unit vectors)
-        """
-        # compute the weights for the combination
-        weights = random_weighting(2)
-        # return the convex combination
-        return tf.reduce_sum(np.array([weight * ex for ex, weight in zip(x, weights)]), axis=0), \
-               tf.reduce_sum(np.array([weight * tf.cast(ex, tf.float32) for ex, weight in zip(y, weights)]),
-                             axis=0)
-
-    # map the dataset with the blend function
-    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
-                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
-
-    return dataset
-
-
-def bc_plus(train_ds, prefetch=4):
-    """
-    :param train_ds: dataset of batches to train on
-    :param prefetch: number of examples to pre fetch from disk
-    :param alpha: Dirichlet parameter.  Weights are drawn from Dirichlet(alpha, ..., alpha) for combining two examples.
-                    Empirically choose a value in [.1, .4]
-    :return: a dataset
-    """
-    # what if we take elements in our dataset and blend them together and predict the mean label?
-
-    rng = np.random.default_rng()
-
-    # create a dataset from which to get batches to blend
-    dataset = train_ds.batch(2)
-
-    def random_weighting(sigma_1, sigma_2):
-        p = rng.uniform(0, 1, 1)
-        p = 1 / (1 + ((sigma_1 / sigma_2) * ((1 - p) / p)))
-        return np.array([p, 1 - p])
-
-    # the generator yields batches blended together with this weighting
-    def blend(x, y):
-        """
-         sum a batch along the batch dimension weighted by a uniform random vector from the n simplex
-          (convex hull of unit vectors)
-        """
-        # compute the weights for the combination
-        weights = random_weighting(tf.sqrt(tf.math.reduce_variance(x[0])), tf.sqrt(tf.math.reduce_variance(x[1])))
-        weights *= float(1 / np.linalg.norm(weights))
-        weights = np.array(weights, dtype=np.double)
-        # sum along the 0th dimension weighted by weights
-        x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
-        y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
-        # return the convex combination
-        return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
-
-    # map the dataset with the blend function
-    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
-                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
-
-    return dataset
-
-
-def generalized_bc_plus(train_ds, n_blended=2, prefetch=4, alpha=.25):
-    """
-    :param train_ds: dataset of batches to train on
-    :param n_blended: number of examples to mix
-    :param prefetch: number of examples to pre fetch from disk
-    :param alpha: Dirichlet parameter.  Weights are drawn from Dirichlet(alpha, ..., alpha) for combining two examples.
-                    Empirically choose a value in [.1, .4]
-    :return: a dataset
-    """
-    # what if we take elements in our dataset and blend them together and predict the mean label?
-
-    alpha = alpha if alpha is not None else 1.0
-
-    rng = np.random.default_rng()
-
-    def add_gaussian_noise(x, y, std=0.01):
-        return x + tf.random.normal(shape=x.shape, mean=0.0, stddev=std, dtype=tf.float32), y
-
-    # create a dataset from which to get batches to blend
-    # add gaussian noise to each tensor
-    dataset = train_ds.map(
-        lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, .01], Tout=(tf.float32, tf.float32)),
-        num_parallel_calls=tf.data.AUTOTUNE).batch(n_blended)
-
-    def random_weighting(n):
-        return rng.dirichlet(tuple([alpha for i in range(n)]), 1)
-
-    # the generator yields batches blended together with this weighting
-    def blend(x, y):
-        """
-         sum a batch along the batch dimension weighted by a uniform random vector from the n simplex
-          (convex hull of unit vectors)
-        """
-        # compute the weights for the combination
-        weights = random_weighting(n_blended)
-        weights *= float(1 / np.linalg.norm(weights))
-        weights = np.array(weights, dtype=np.double).reshape(-1, 1)
-        # sum along the 0th dimension weighted by weights
-        x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
-        y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
-        # return the convex combination
-        return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
-
-    # map the dataset with the blend function
-    dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
-                          num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
-
-    return dataset
 
 
 def fix_image_df(df):
@@ -589,217 +414,6 @@ def generate_fname(args):
         str(time()).replace('.', '')[-6:])
 
 
-def cifar(args, n_classes=10):
-    # TODO: cross-validation, distributed training
-    image_size, n_classes = (32, 32), n_classes
-
-    network_params = {'learning_rate': args.lrate,
-                      'conv_filters': args.filters,
-                      'conv_size': args.kernels,
-                      'attention_heads': args.hidden,
-                      'image_size': (image_size[0], image_size[1], 3),
-                      'n_classes': n_classes,
-                      'l1': args.l1,
-                      'l2': args.l2,
-                      'dropout': args.dropout,
-                      'loss': 'categorical_crossentropy'}
-
-    print('hidden', args.hidden)
-    network_fn = build_axial_transformer
-
-    switch = {
-        10: cifar10_dset,
-        100: cifar100_dset
-    }
-
-    train_dset, val_dset, test_dset = switch.get(n_classes)(batch_size=args.batch)
-    # define our randAugment object
-    rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
-    # data augmentation strategy selection
-    if args.convexAugment and args.randAugment:
-        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
-                                    num_parallel_calls=tf.data.AUTOTUNE, )
-        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
-    elif args.convexAugment:
-        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
-    elif args.randAugment:
-        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
-                                    num_parallel_calls=tf.data.AUTOTUNE, )
-    else:
-        train_dset = bc_plus(train_dset, 8)
-
-    # peek at the dataset instead of training
-    if args.peek:
-        explore_image_dataset(train_dset, 8)
-        exit(-1)
-    # create the scope
-    # strategy = tf.distribute.MirroredStrategy()
-    # with strategy.scope():
-    # build the model (in the scope)
-    model = network_fn(**network_params)
-    # train the model
-    model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
-                                train_steps=args.steps_per_epoch, val_steps=10000 // args.batch)
-    # save the model
-    try:
-        with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
-            pickle.dump(model_data, fp)
-    except Exception as e:
-        print(e)
-        with open(f'./{generate_fname(args)}', 'wb') as fp:
-            pickle.dump(model_data, fp)
-
-
-def cifar10(args):
-    cifar(args, 10)
-
-
-def cifar100(args):
-    cifar(args, 100)
-
-
-def DOT_CV_self_train(args):
-    # TODO: cross-validation, distributed training, peeking
-    # Parse and check incoming arguments
-    parser = create_parser()
-    args = parser.parse_args()
-    args, args_str = augment_args(args)
-
-    prep_gpu(args.gpu, style=args.gpu_type)
-
-    image_size, n_classes = (256, 256), 3
-
-    paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
-             'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
-             'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
-
-    unlabeled_paths = [os.curdir + '/../unlabeled/']
-
-    unlabeled_df = load_unlabeled(unlabeled_paths)
-
-    print('getting dsets...')
-    if args.cross_validate:
-        print(f'({args.cv_k}-fold) cross-validation rotation: {args.cv_rotation}')
-        train_df, withheld_df, val_df, test_df = get_cv_rotation(
-            [os.curdir + '/../data/' + path for path in paths],
-            train_fraction=args.train_fraction, k=args.cv_k, rotation=args.cv_rotation)
-    else:
-        train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
-            [os.curdir + '/../data/' + path for path in paths],
-            train_fraction=args.train_fraction)
-
-    network_params = {'learning_rate': args.lrate,
-                      'conv_filters': args.filters,
-                      'conv_size': args.kernels,
-                      'attention_heads': args.hidden,
-                      'image_size': (image_size[0], image_size[1], 3),
-                      'n_classes': n_classes,
-                      'l1': args.l1,
-                      'l2': args.l2,
-                      'dropout': args.dropout,
-                      'loss': 'categorical_crossentropy'}
-
-    network_fn = build_patchwise_vision_transformer
-
-    def dataset_fn(df, train=False):
-        ds = to_dataset(df, shuffle=True, image_size=image_size, batch_size=args.batch, prefetch=8, seed=42,
-                        class_mode='categorical')
-        if train:
-            # define our randAugment object
-            rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
-            # data augmentation strategy selection
-            if args.convexAugment and args.randAugment:
-                ds = ds.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
-                            num_parallel_calls=tf.data.AUTOTUNE, )
-                ds = generalized_bc_plus(ds, args.convex_dim, 8, args.convex_prob)
-            elif args.convexAugment:
-                ds = generalized_bc_plus(ds, args.convex_dim, 8, args.convex_prob)
-            elif args.randAugment:
-                ds = ds.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
-                            num_parallel_calls=tf.data.AUTOTUNE, )
-            else:
-                ds = bc_plus(ds, 8)
-
-        return ds
-
-    self_train(args, network_fn, network_params, train_df, val_df, withheld_df,
-               dataset_fn=custom_rand_augment_object(.1, 2, leq_M=False),
-               evaluate_on=None)
-
-
-def DOT_CV(args):
-    image_size, n_classes = (256, 256), 3
-
-    paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
-             'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
-             'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
-
-    print('getting dsets...')
-    if args.cross_validate:
-        print(f'({args.cv_k}-fold) cross-validation rotation: {args.cv_rotation}')
-        train_df, withheld_df, val_df, test_df = get_cv_rotation(
-            [os.curdir + '/../data/' + path for path in paths],
-            train_fraction=args.train_fraction, k=args.cv_k, rotation=args.cv_rotation)
-    else:
-        train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
-            [os.curdir + '/../data/' + path for path in paths],
-            train_fraction=args.train_fraction)
-
-    network_params = {'learning_rate': args.lrate,
-                      'conv_filters': args.filters,
-                      'conv_size': args.kernels,
-                      'attention_heads': args.hidden,
-                      'image_size': (image_size[0], image_size[1], 3),
-                      'n_classes': n_classes,
-                      'l1': args.l1,
-                      'l2': args.l2,
-                      'dropout': args.dropout,
-                      'loss': 'categorical_crossentropy'}
-
-    network_fn = build_patchwise_vision_transformer
-
-    class_mode = network_params['loss'].split('_')[0]
-    val_dset = to_dataset(val_df, shuffle=True, batch_size=args.batch, class_mode=class_mode)
-    train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
-                            class_mode='categorical', center=True)
-    # define our randAugment object
-    rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
-    # data augmentation strategy selection
-    if args.convexAugment and args.randAugment:
-        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
-                                    num_parallel_calls=tf.data.AUTOTUNE, )
-        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
-    elif args.convexAugment:
-        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
-    elif args.randAugment:
-        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
-                                    num_parallel_calls=tf.data.AUTOTUNE, )
-    else:
-        train_dset = bc_plus(train_dset, 8)
-
-    # peek at the dataset instead of training
-    if args.peek:
-        explore_image_dataset(train_dset, 8)
-        exit(-1)
-    # TODO: make a CLA for distributed training
-    # create the scope
-    # strategy = tf.distribute.MirroredStrategy()
-    # with strategy.scope():
-    # build the model (in the scope)
-    model = network_fn(**network_params)
-    # train the model
-    model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
-                                train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
-    # save the model
-    try:
-        with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
-            pickle.dump(model_data, fp)
-    except Exception as e:
-        print(e)
-        with open(f'./{generate_fname(args)}', 'wb') as fp:
-            pickle.dump(model_data, fp)
-
-
 if __name__ == '__main__':
     # Parse and check incoming arguments
     parser = create_parser()
@@ -809,6 +423,7 @@ if __name__ == '__main__':
     prep_gpu(args.gpu, style=args.gpu_type)
 
     switch = {
+        'self_train': DOT_CV_self_train,
         'test': DOT_CV,
         'cifar10': cifar10,
         'cifar100': cifar100,
