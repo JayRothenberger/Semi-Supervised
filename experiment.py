@@ -203,7 +203,7 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
 
         # save the model
         try:
-            with open(f'{os.curdir}/../results/{train_iteration}_{generate_fname(args)}', 'wb') as fp:
+            with open(f'{os.curdir}/../results/{train_iteration}_{time()}', 'wb') as fp:
                 pickle.dump(model_data, fp)
         except Exception as e:
             print(e)
@@ -225,7 +225,6 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
                                                                      model,
                                                                      image_size,
                                                                      distance_fn=distance_function,
-                                                                     image_gen=default_image_gen,
                                                                      pseudolabeled_data=train_df,
                                                                      unlabeled_data=unlabeled_df,
                                                                      labeled_data=labeled,

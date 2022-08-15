@@ -334,7 +334,7 @@ def to_flow(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16):
 
 
 def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=4, seed=42,
-               class_mode='sparse', center=False, cache=True):
+               class_mode='sparse', center=False, cache=True, repeat=True, batch=True):
     if df is None:
         return None
 
@@ -361,7 +361,14 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
 
         return image, label
 
-    df['class'] = df['class'].astype(str)
+    try:
+        df['class'] = df['class'].astype(int).astype(str)
+    except KeyError as e:
+        print('setting class manually to 0...')
+        df['class'] = ['0' for i in range(len(df))]
+    except ValueError as e:
+        print('setting class manually to 0...')
+        df['class'] = ['0' for i in range(len(df))]
     slices = df.to_numpy()
     out_type = tf.int32 if class_mode == 'sparse' else tf.float32
 
@@ -385,7 +392,13 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
     if cache:
         ds = ds.cache()
 
-    return ds.repeat().batch(batch_size).prefetch(prefetch)
+    if repeat:
+        ds = ds.repeat()
+
+    if batch:
+        ds = ds.batch(batch_size)
+
+    return ds.prefetch(prefetch)
 
 
 def get_dataframes_self_train(train_dirlist, val_dirlist=None, train_fraction=.05):
@@ -408,7 +421,7 @@ def get_dataframes_self_train(train_dirlist, val_dirlist=None, train_fraction=.0
                                 train_fraction=train_fraction)
 
 
-def augment_with_neighbors(args, model, image_size, image_gen, distance_fn, labeled_data, unlabeled_data,
+def augment_with_neighbors(args, model, image_size, distance_fn, labeled_data, unlabeled_data,
                            hard_labels=True, pseudolabeled_data=None, sample=None, pseudo_relabel=True):
     """
     augments the pseudolabeled_data dataframe with a batch of k nearest neighbors from the unlabeled_data dataframe
@@ -438,57 +451,45 @@ def augment_with_neighbors(args, model, image_size, image_gen, distance_fn, labe
 
     if sample is None:
         sample = 1
-
-    unlabeled_sample = unlabeled_data.iloc[
-        np.random.choice(range(len(unlabeled_data)),
-                         sample * int(len(unlabeled_data)), replace=False)]
-
-    unlabeled_dataset = to_dataset(unlabeled_sample, shuffle=False, image_size=image_size, batch_size=args.batch)
-
-    # compute the distance between every image pair
-    distances = []
-    # pre-loading examples from disk
     print('starting the timer')
     start = perf_time()
 
+    unlabeled_sample = unlabeled_data.iloc[
+        np.random.choice(range(len(unlabeled_data)),
+                         int(sample * len(unlabeled_data)), replace=False)]
+
+    unlabeled_dataset = to_dataset(unlabeled_sample, shuffle=False, image_size=image_size, batch_size=1,
+                                   repeat=False, cache=False)
+    labeled_dataset = to_dataset(labeled_data, shuffle=False, image_size=image_size, batch_size=1,
+                                 repeat=True, cache=False)
+    print(f'sampling {unlabeled_dataset.cardinality()} batches (~{unlabeled_dataset.cardinality()}) '
+          f'of {len(unlabeled_data)} available unlabeled examples for NN')
+    # compute the distance between every image pair
+    distances = []
+    # pre-loading examples from disk
+
     # retrieve top-1 confidence for each prediction on the unlabeled data
-    top_1 = np.max(model.predict(unlabeled_dataset, steps=len(unlabeled_sample) // args.batch), axis=1)
-    # this list holds (enumerate_index, (df_index, unlabeled_image_tensor)) elements (unlabeled images)
-    ulab_img_array = [(i,
-                       tf.keras.preprocessing.image.img_to_array(
-                           tf.keras.preprocessing.image.load_img(unlabeled['filepath'], target_size=image_size)))
-                      for i, (j, unlabeled) in enumerate(unlabeled_sample.iterrows())]
+    # TODO: make use of this to avoid the second predict step below
+    top_1 = np.max(model.predict(unlabeled_dataset), axis=-1)
 
-    print(f'loaded unlabeled images ({image_size}): ', perf_time() - start)
-    start = perf_time()
-
-    print(f'calculated top-1 ({image_size}): ', perf_time() - start)
-    start = perf_time()
-    # this is the array over which the distance to the unlabeled points is computed (either labeled or pseudolabeled)
-    # it has the same structure as the previous list, but this one has labeled or pseudolabeled images
-    lab_img_array = [(i,
-                      tf.keras.preprocessing.image.img_to_array(
-                          tf.keras.preprocessing.image.load_img(labeled['filepath'], target_size=image_size)))
-                     for i, (j, labeled) in enumerate(labeled_data.iterrows())] \
-        if args.closest_to_labeled else [(i,
-                                          tf.keras.preprocessing.image.img_to_array(
-                                              tf.keras.preprocessing.image.load_img(labeled['filepath'],
-                                                                                    target_size=image_size)))
-                                         for i, (j, labeled) in enumerate(pseudolabeled_data.iterrows())]
-
-    print(f'loaded labeled images ({image_size}): ', perf_time() - start)
-    # now we have loaded two arrays of image tensors
     start = perf_time()
     count = 0
     # for each unlabeled image
-    for i, img0 in ulab_img_array:
-        count += 1
-        print(f'{count} / {len(ulab_img_array)} ({perf_time() - start}s)                                              ',
-              end='\r')
-        # record the minimum distance between this unlabeled image and all labeled images in 'distances'
-        distances.append(
-            min([(i, distance_fn(img0, img1, top_1[i])) for j, img1 in lab_img_array], key=lambda x: x[-1]))
-
+    if args.distance_function != 'confidence':
+        for img0, y0 in unlabeled_dataset:
+            # TODO: make this faster
+            print(f'{count + 1} / {unlabeled_dataset.cardinality()} ({perf_time() - start}s)                          ',
+                  end='\r')
+            # record the minimum distance between this unlabeled image and all labeled images in 'distances'
+            distances.append(
+                             (
+                                 count,
+                                 min([distance_fn(img0[0], img1[0], top_1[count]) for img1, y1 in labeled_dataset])
+                             )
+                            )
+            count += 1
+    else:
+        distances = list(enumerate(top_1))
     print()
     print('finished computing distance:', perf_time() - start)
     start = perf_time()
@@ -515,12 +516,11 @@ def augment_with_neighbors(args, model, image_size, image_gen, distance_fn, labe
     if pseudo_relabel:
         pseudo_labeled_batch = pd.concat([df_difference(pseudolabeled_data, labeled_data), pseudo_labeled_batch],
                                          ignore_index=True)
-
-    pseudo_labeled_batch_gen = to_dataset(pseudo_labeled_batch, shuffle=False, image_size=image_size, batch_size=args.batch)
-
+    pseudo_labeled_batch_gen = to_dataset(pseudo_labeled_batch, shuffle=False, image_size=image_size,
+                                          batch_size=args.batch, repeat=False, cache=False)
     # set the classes as the pseudo-labels
     if hard_labels:
-        pseudo_labels = np.argmax(model.predict(pseudo_labeled_batch_gen, steps=len(pseudo_labeled_batch) // args.batch), axis=1)
+        pseudo_labels = np.argmax(model.predict(pseudo_labeled_batch_gen), axis=1)
     else:
         pseudo_labels = model.predict(pseudo_labeled_batch_gen, steps=len(pseudo_labeled_batch) // args.batch)
     # set the assign the pseudo-labels

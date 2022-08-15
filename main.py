@@ -55,7 +55,7 @@ def create_parser():
                                                                           'point at every iteration -- alternative is '
                                                                           'only the new batch of labels is determined '
                                                                           'by the teacher')
-    parser.add_argument('--distance_function', type=str, default='euclidean', help='Determines k-nearest neighbors '
+    parser.add_argument('--distance_function', type=str, default='confidence', help='Determines k-nearest neighbors '
                                                                                    'for pseudo-label production')
     parser.add_argument('--closest_to_labeled', action='store_true',
                         help='compute nearest neighbors only to the labeled set')
@@ -141,12 +141,12 @@ def exp_type_to_hyperparameters(args):
             'dropout': [0.1],
             'train_iterations': [20],
             'train_fraction': [1],
-            'epochs': [50],  # TODO
+            'epochs': [512],
             'convex_dim': [2],
-            'convex_prob': [.75],
+            'convex_prob': [.5],
             'steps_per_epoch': [512],
-            'patience': [4],  # TODO
-            'batch': [20],  # TODO
+            'patience': [32],
+            'batch': [48],
             'augment_batch': [2048],
             'lrate': [1e-4],
             'randAugment': [True],
@@ -155,6 +155,7 @@ def exp_type_to_hyperparameters(args):
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
+            'sample': [.1],
         },
         'cifar100': {
             'filters': [[36, 64]],
