@@ -25,21 +25,29 @@ def varying_args(evaluator):
 
 
 def figure_metric_epoch(evaluator, title, fname, metric):
+    SMALL_SIZE = 8
+    MEDIUM_SIZE = 10
+    BIGGER_SIZE = 16
+
+    plt.rc('font', size=BIGGER_SIZE)          # controls default text sizes
+
     legend = []
     to_plot = []
     to_print = []
     varying = varying_args(evaluator)
-    varying -= {'cpus_per_task', 'exp_type', 'exp', 'rand_M', 'rand_N', 'gpu_type'}
+    varying -= {'cpus_per_task', 'exp_type', 'exp', 'rand_M', 'rand_N', 'gpu_type', }
 
     for model in evaluator.models:
         def plot(metric, series, c):
             to_plot.append((series, {'linestyle': '-', 'c': c}))
             vals = vars(model.args)
-            legend.append(metric + ' ' + ' | '.join([f'{val} {vals[val]}' for val in varying]))
+            prefix = ' & ' + metric + f'({len(model.history["loss"]) - model.args.patience}) & '
+            legend.append(prefix + ' & '.join([f'{val} {vals[val]}' for val in varying]) + '\\' + '\\')
             if 'loss' in metric:
-                to_print.append((metric + ' ' + ' | '.join([f'{val} {vals[val]}' for val in varying]), min(series)))
+                to_print.append((prefix + ' & '.join([f'{val} {vals[val]}' for val in varying]) + '\\' + '\\', min(series)))
             else:
-                to_print.append((metric + ' ' + ' | '.join([f'{val} {vals[val]}' for val in varying]), max(series)))
+                to_print.append((prefix + ' & '.join([f'{val} {vals[val]}' for val in varying]) + '\\' + '\\',
+                                 max(series)))
 
         # plot the metric v.s. epochs for each model
         r = float(np.random.uniform(0, 1, 1))
@@ -63,7 +71,7 @@ def figure_metric_epoch(evaluator, title, fname, metric):
 
     # save the figure
     fig = plt.gcf()
-    fig.set_size_inches(12, 7.5)
+    fig.set_size_inches(16, 10)
     plt.savefig(fname)
     plt.clf()
     plt.close()
@@ -107,7 +115,7 @@ if __name__ == "__main__":
             print('NO GPU')
     prep_gpu(True)
 
-    evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/self-train/', fbase='')
+    evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/da/', fbase='')
     for model in evaluator.models:
         break
         print(model.args)

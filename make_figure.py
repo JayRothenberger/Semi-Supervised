@@ -192,7 +192,9 @@ def explore_image_dataset(dset, num_images, fname=''):
 
     for i, img in enumerate(imgs):
         print(img.shape)
-        img = Image.fromarray(np.uint8(img[0] * 255))
+        img = img[0] + np.max(np.min(img[0]), 0)
+        img = img - np.max(np.min(img), 0)
+        img = Image.fromarray(np.uint8((img / np.max(img)) * 255))
         with open(os.curdir + f'/../visualizations/pictures/{i}_{fname}.jpg', 'wb') as fp:
             img.save(fp)
 

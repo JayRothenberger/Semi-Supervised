@@ -177,7 +177,7 @@ def get_cv_rotation(dirlist, rotation=0, k=5, train_fraction=1):
     return train, train_withheld, val, test
 
 
-def cifar100_dset(path='./../cifar-100/', batch_size=32, prefetch=8, center=True, cache=True):
+def cifar100_dset(path='./../cifar-100/', batch_size=32, prefetch=1, center=True, cache=True):
     import pickle
     with open(path + 'train', 'rb') as fo:
         train = pickle.load(fo, encoding='bytes')
@@ -235,7 +235,7 @@ def cifar100_dset(path='./../cifar-100/', batch_size=32, prefetch=8, center=True
     return train, val, test
 
 
-def cifar10_dset(path='./../cifar-10/', batch_size=32, prefetch=8, center=True, cache=True):
+def cifar10_dset(path='./../cifar-10/', batch_size=32, prefetch=1, center=True, cache=True):
     import pickle
     train = []
     with open(path + 'data_batch_1', 'rb') as fo:
@@ -333,8 +333,8 @@ def to_flow(df, image_gen, shuffle=False, image_size=(256, 256), batch_size=16):
                                          shuffle=shuffle)
 
 
-def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=4, seed=42,
-               class_mode='sparse', center=False, cache=True, repeat=True, batch=True):
+def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch=1, seed=42,
+               class_mode='sparse', center=False, cache=True, repeat=True, batch=True, **kwargs):
     if df is None:
         return None
 
@@ -372,25 +372,21 @@ def to_dataset(df, shuffle=False, image_size=(256, 256), batch_size=16, prefetch
     slices = df.to_numpy()
     out_type = tf.int32 if class_mode == 'sparse' else tf.float32
 
-    if shuffle:
-        ds = tf.data.Dataset.from_tensor_slices(
-            slices
-        ).shuffle(len(slices), seed, True).map(lambda x:
-                                               tf.py_function(func=preprocess_image,
-                                                              inp=[x, image_size, center],
-                                                              Tout=(tf.float32, out_type)),
-                                               num_parallel_calls=tf.data.AUTOTUNE)
-    else:
-        ds = tf.data.Dataset.from_tensor_slices(
-            slices
-        ).map(lambda x:
-              tf.py_function(func=preprocess_image,
-                             inp=[x, image_size],
-                             Tout=(tf.float32, out_type)),
-              num_parallel_calls=tf.data.AUTOTUNE)
+    ds = tf.data.Dataset.from_tensor_slices(
+        slices
+    )
 
     if cache:
         ds = ds.cache()
+
+    if shuffle:
+        ds = ds.shuffle(len(slices), seed, True)
+
+    ds = ds.map(lambda x:
+                tf.py_function(func=preprocess_image,
+                               inp=[x, image_size],
+                               Tout=(tf.float32, out_type)),
+                num_parallel_calls=tf.data.AUTOTUNE)
 
     if repeat:
         ds = ds.repeat()
@@ -482,11 +478,11 @@ def augment_with_neighbors(args, model, image_size, distance_fn, labeled_data, u
                   end='\r')
             # record the minimum distance between this unlabeled image and all labeled images in 'distances'
             distances.append(
-                             (
-                                 count,
-                                 min([distance_fn(img0[0], img1[0], top_1[count]) for img1, y1 in labeled_dataset])
-                             )
-                            )
+                (
+                    count,
+                    min([distance_fn(img0[0], img1[0], top_1[count]) for img1, y1 in labeled_dataset])
+                )
+            )
             count += 1
     else:
         distances = list(enumerate(top_1))
@@ -538,7 +534,7 @@ def augment_with_neighbors(args, model, image_size, distance_fn, labeled_data, u
     return pseudolabeled_data, unlabeled_data, labeled_data
 
 
-def blended_dset(train_ds, n_blended=2, prefetch=4, prob=None, std=.1):
+def blended_dset(train_ds, n_blended=2, prefetch=4, prob=None, std=.1, **kwargs):
     """
     :param train_ds: dataset of training images
     :param batch_size: size of batches to return from the generator
@@ -593,7 +589,7 @@ def blended_dset(train_ds, n_blended=2, prefetch=4, prob=None, std=.1):
     return dataset
 
 
-def mixup_dset(train_ds, prefetch=4, alpha=None):
+def mixup_dset(train_ds, prefetch=4, alpha=None, **kwargs):
     """
     :param train_ds: dataset of batches to train on
     :param prefetch: number of examples to pre fetch from disk
@@ -611,20 +607,24 @@ def mixup_dset(train_ds, prefetch=4, alpha=None):
     dataset = train_ds.batch(2)
 
     def random_weighting(n):
-        return rng.dirichlet([alpha for i in range(n + 1)], 1)
+        return rng.dirichlet([alpha for i in range(n)], 1)
 
+    # the generator yields batches blended together with this weighting
     # the generator yields batches blended together with this weighting
     def blend(x, y):
         """
-         sum a batch along the batch dimension weighted by a uniform random vector from the n-1 simplex
+         sum a batch along the batch dimension weighted by a uniform random vector from the n simplex
           (convex hull of unit vectors)
         """
         # compute the weights for the combination
         weights = random_weighting(2)
+        weights *= float(1 / np.linalg.norm(weights))
+        weights = np.array(weights, dtype=np.double).reshape(-1, 1)
+        # sum along the 0th dimension weighted by weights
+        x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
+        y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))[0]
         # return the convex combination
-        return tf.reduce_sum(np.array([weight * ex for ex, weight in zip(x, weights)]), axis=0), \
-               tf.reduce_sum(np.array([weight * tf.cast(ex, tf.float32) for ex, weight in zip(y, weights)]),
-                             axis=0)
+        return tf.cast(x, tf.float32), tf.cast(y, tf.float32)
 
     # map the dataset with the blend function
     dataset = dataset.map(lambda x, y: tf.py_function(blend, inp=[x, y], Tout=(tf.float32, tf.float32)),
@@ -633,7 +633,7 @@ def mixup_dset(train_ds, prefetch=4, alpha=None):
     return dataset
 
 
-def bc_plus(train_ds, prefetch=4):
+def bc_plus(train_ds, prefetch=4, **kwargs):
     """
     :param train_ds: dataset of batches to train on
     :param prefetch: number of examples to pre fetch from disk
@@ -676,7 +676,7 @@ def bc_plus(train_ds, prefetch=4):
     return dataset
 
 
-def generalized_bc_plus(train_ds, n_blended=2, prefetch=4, alpha=.25):
+def generalized_bc_plus(train_ds, n_blended=2, prefetch=4, alpha=.25, **kwargs):
     """
     :param train_ds: dataset of batches to train on
     :param n_blended: number of examples to mix

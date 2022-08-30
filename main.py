@@ -28,8 +28,9 @@ def create_parser():
     # CPU/GPU
     parser.add_argument('--gpu', action='store_true', help='Use a GPU')
     parser.add_argument('--cpus_per_task', type=int, default=None, help='number of cpus per task available to the job')
-    parser.add_argument('--gpu_type', type=str, default="a100", help="a100 or v100 type of gpu training on")
+    parser.add_argument('--gpu_type', type=str, default="None", help="a100 or v100 type of gpu training on")
     parser.add_argument('--distributed', action='store_true', help='Use multiple GPUs')
+    parser.add_argument('--prefetch', type=int, default=12, help='number of dataset batches to prefetch')
 
     # High-level experiment configuration
     parser.add_argument('--label', type=str, default="", help="Experiment label")
@@ -49,7 +50,8 @@ def create_parser():
                         help='number of examples added in each iteration of retraining')
     parser.add_argument('--retrain_fully', type=bool, default=False,
                         help='retrain the model from initialization entirely instead of tuning')
-    parser.add_argument('--sample', type=float, default=None, help="fraction of available training data to use for knn "
+    parser.add_argument('--sample', type=float, default=None, help="fraction of available unlabeled data to use for "
+                                                                   "knn "
                                                                    "calculation")
     parser.add_argument('--pseudo_relabel', type=bool, default=True, help='Teacher assigns a label to every unlabeled'
                                                                           'point at every iteration -- alternative is '
@@ -61,7 +63,7 @@ def create_parser():
                         help='compute nearest neighbors only to the labeled set')
     # Data augmentation parameters
     parser.add_argument('--randAugment', action='store_true', help='Use rand augment data augmentation')
-    parser.add_argument('--convexAugment', action='store_true', help='Use convex data augmentation')
+    parser.add_argument('--convexAugment', type=str, default=None, help='type of MSDA to use.')
 
     parser.add_argument('--rand_M', type=float, default=0, help='magnitude parameter for rand augment')
     parser.add_argument('--rand_N', type=int, default=0, help='iterations parameter for rand augment')
@@ -127,7 +129,7 @@ def exp_type_to_hyperparameters(args):
             'lrate': [1e-4],
             'randAugment': [False],
             'peek': [False],
-            'convexAugment': [False],
+            'convexAugment': [None],
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
@@ -139,7 +141,7 @@ def exp_type_to_hyperparameters(args):
             'l1': [None],
             'l2': [None],
             'dropout': [0.1],
-            'train_iterations': [20],
+            'train_iterations': [2],
             'train_fraction': [1],
             'epochs': [512],
             'convex_dim': [2],
@@ -147,15 +149,15 @@ def exp_type_to_hyperparameters(args):
             'steps_per_epoch': [512],
             'patience': [32],
             'batch': [48],
-            'augment_batch': [2048],
+            'augment_batch': [65536],
             'lrate': [1e-4],
             'randAugment': [True],
             'peek': [False],
-            'convexAugment': [True],
+            'convexAugment': ['mixup'],
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
-            'sample': [.1],
+            'sample': [1.0],
         },
         'cifar100': {
             'filters': [[36, 64]],
@@ -175,55 +177,54 @@ def exp_type_to_hyperparameters(args):
             'lrate': [1e-3],
             'randAugment': [False],
             'peek': [False],
-            'convexAugment': [False],
+            'convexAugment': [None],
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
             'cfar': [True]
         },
         'cifar10': {
-            'filters': [[96, 96]],
-            'kernels': [[2, 1]],
-            'hidden': [[8, 8, 8]],
+            'filters': [[12, 24, 48]],
+            'kernels': [[3, 3, 1]],
+            'hidden': [[10, 10, 10]],
             'l1': [None],
             'l2': [None],
-            'dropout': [0.1],
+            'dropout': [0.05],
             'train_iterations': [20],
             'train_fraction': [1],
             'epochs': [512],
             'convex_dim': [2],
             'convex_prob': [.5],
-            'steps_per_epoch': [256],
-            'patience': [32],
-            'batch': [128],
-            'lrate': [2e-4],
-            'randAugment': [True],
+            'steps_per_epoch': [1024],
+            'patience': [5],
+            'batch': [196],
+            'lrate': [1e-4],
+            'randAugment': [False, True],
             'peek': [False],
-            'convexAugment': [True],
+            'convexAugment': ['blended'],
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
-            'cfar': [True]
         },
-        'test': {
-            'filters': [[36, 64]],
-            'kernels': [[4, 1]],
-            'hidden': [[3, 3]],
+        'da': {
+            'filters': [[12, 24, 48, 64, 64]],
+            'kernels': [[3, 5, 3, 2, 1]],
+            'hidden': [[12, 12, 12, 12]],
             'l1': [None],
             'l2': [None],
-            'dropout': [0.1],
+            'dropout': [0.1, .2],
             'train_iterations': [20],
             'train_fraction': [1],
             'epochs': [512],
-            'convex_dim': [2, 3],
-            'convex_prob': [1.0, .4],
+            'convex_dim': [2],
+            'convex_prob': [.5],
             'steps_per_epoch': [512],
             'patience': [32],
-            'batch': [48],
-            'lrate': [1e-4],
+            'batch': [20],
+            'lrate': [5e-5, 1e-4],
             'randAugment': [False],
             'peek': [False],
-            'convexAugment': [True],
+            'convexAugment': ['blended'],
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
@@ -271,7 +272,7 @@ def augment_args(args):
     return ji.set_attributes_by_index(args.exp, args)
 
 
-def prep_gpu(gpu=False, style='a100'):
+def prep_gpu(index, gpu=False, style='a100'):
     """prepare the GPU for tensorflow computation"""
     # tell tensorflow to be quiet
     # os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -280,20 +281,20 @@ def prep_gpu(gpu=False, style='a100'):
         tf.config.threading.set_inter_op_parallelism_threads(args.cpus_per_task)
         tf.config.threading.set_intra_op_parallelism_threads(args.cpus_per_task)
 
+    # GPU check
+    physical_devices = tf.config.list_physical_devices('GPU')
     # Turn off GPU?
     if not gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
     elif style == 'a100':
-        pass
-        # os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # just use one GPU
+        tf.config.set_visible_devices(physical_devices[index % len(tf.config.list_physical_devices('GPU'))], 'GPU')
     else:
-        pass  # do nothing (v100)
-
-    # GPU check
-    physical_devices = tf.config.list_physical_devices('GPU')
+        pass  # do nothing (v100, distributed)
+    physical_devices = tf.config.get_visible_devices('GPU')
     n_physical_devices = len(physical_devices)
+    print(physical_devices)
 
-    if n_physical_devices > 0:
+    if n_physical_devices > 1:
         for physical_device in physical_devices:
             tf.config.experimental.set_memory_growth(physical_device, True)
         print('We have %d GPUs\n' % n_physical_devices)
@@ -421,15 +422,36 @@ if __name__ == '__main__':
     args = parser.parse_args()
     args, args_str = augment_args(args)
 
-    prep_gpu(args.gpu, style=args.gpu_type)
+    prep_gpu(args.exp, args.gpu, style=args.gpu_type)
 
     switch = {
         'self_train': DOT_CV_self_train,
-        'test': DOT_CV,
+        'da': DOT_CV,
         'cifar10': cifar10,
         'cifar100': cifar100,
         'control': DOT_CV
     }
+    from data_generator import blended_dset, mixup_dset, bc_plus, generalized_bc_plus, to_dataset
+    da_switch = {
+        'blended': blended_dset,
+        'mixup': mixup_dset,
+        'bc+':  bc_plus,
+        'bc++': generalized_bc_plus,
+    }
+    da_args = {
+        'n_blended': args.convex_dim,
+        'prefetch': args.prefetch,
+        'prob': args.convex_prob,
+        'std': .05,
+        'alpha': args.convex_prob,
+        'cache': args.cache
+    }
+
+    def default(dset, **kwargs):
+        return dset
+
+    # takes: train_ds, n_blended, prefetch, prob, std, alpha
+    da_fn = da_switch.get(args.convexAugment, default)
 
     exp_fn = switch.get(args.exp_type)
-    exp_fn(args)
+    exp_fn(args, da_fn, da_args)

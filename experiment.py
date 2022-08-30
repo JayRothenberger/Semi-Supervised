@@ -10,7 +10,7 @@ import gc
 from cnn_network import *
 from data_structures import ModelData
 from data_generator import augment_with_neighbors, to_dataset, cifar10_dset, cifar100_dset, blended_dset, bc_plus,\
-    generalized_bc_plus, load_unlabeled, get_cv_rotation, get_dataframes_self_train
+    generalized_bc_plus, load_unlabeled, get_cv_rotation, get_dataframes_self_train, mixup_dset
 from transforms import custom_rand_augment_object
 from make_figure import explore_image_dataset
 
@@ -182,13 +182,18 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
         'confidence': distances.confidence
     }
 
-    default_image_gen = tf.keras.preprocessing.image.ImageDataGenerator()
-
     model = None
     labeled = train_df
     for train_iteration in range(args.train_iterations):
         if not train_iteration or args.retrain_fully:
-            model = network_fn(**network_params)
+            if args.distributed:
+                # create the scope
+                strategy = tf.distribute.MirroredStrategy()
+                with strategy.scope():
+                    # build the model (in the scope)
+                    model = network_fn(**network_params)
+            else:
+                model = network_fn(**network_params)
 
         model_data = start_training(args,
                                     model,
@@ -236,7 +241,7 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
         print('retraining: ', train_iteration)
 
 
-def cifar(args, n_classes=10):
+def cifar(args, da_fn, da_args, n_classes=10):
     # TODO: cross-validation
     image_size, n_classes = (32, 32), n_classes
 
@@ -249,10 +254,12 @@ def cifar(args, n_classes=10):
                       'l1': args.l1,
                       'l2': args.l2,
                       'dropout': args.dropout,
-                      'loss': 'categorical_crossentropy'}
+                      'loss': 'categorical_crossentropy',
+                      'pad': 4,
+                      'overlap': 4}
 
     print('hidden', args.hidden)
-    network_fn = build_axial_transformer
+    network_fn = build_transformer_4
 
     switch = {
         10: cifar10_dset,
@@ -266,10 +273,8 @@ def cifar(args, n_classes=10):
     if args.randAugment:
         train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
                                     num_parallel_calls=tf.data.AUTOTUNE, )
-    if args.convexAugment:
-        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
-    else:
-        train_dset = bc_plus(train_dset, 8)
+    # perform MSDA
+    train_dset = da_fn(train_dset, **da_args)
 
     # peek at the dataset instead of training
     if args.peek:
@@ -296,15 +301,15 @@ def cifar(args, n_classes=10):
             pickle.dump(model_data, fp)
 
 
-def cifar10(args):
-    cifar(args, 10)
+def cifar10(args, da_fn, da_args):
+    cifar(args, da_fn, da_args, 10)
 
 
-def cifar100(args):
-    cifar(args, 100)
+def cifar100(args, da_fn, da_args):
+    cifar(args, da_fn, da_args, 100)
 
 
-def DOT_CV_self_train(args):
+def DOT_CV_self_train(args, da_fn, da_args):
     # TODO: cross-validation, peeking
     if args.peek:
         raise NotImplementedError('peeking is not implemented for this experiment type')
@@ -344,7 +349,7 @@ def DOT_CV_self_train(args):
     network_fn = build_patchwise_vision_transformer
 
     def dataset_fn(df, train=False, cache=True):
-        ds = to_dataset(df, shuffle=True, image_size=image_size, batch_size=args.batch, prefetch=8, seed=42,
+        ds = to_dataset(df, shuffle=True, image_size=image_size, batch_size=args.batch, seed=42,
                         class_mode='categorical', cache=cache)
         if train:
             # define our randAugment object
@@ -353,8 +358,9 @@ def DOT_CV_self_train(args):
             if args.randAugment:
                 ds = ds.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
                             num_parallel_calls=tf.data.AUTOTUNE, )
-            if args.convexAugment:
-                ds = blended_dset(ds, args.convex_dim, 8, args.convex_prob, .05)
+
+            # perform MSDA
+            ds = da_fn(ds, **da_args)
 
         return ds
 
@@ -363,7 +369,7 @@ def DOT_CV_self_train(args):
                evaluate_on=None)
 
 
-def DOT_CV(args):
+def DOT_CV(args, da_fn, da_args):
     image_size, n_classes = (256, 256), 3
 
     paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
@@ -390,9 +396,11 @@ def DOT_CV(args):
                       'l1': args.l1,
                       'l2': args.l2,
                       'dropout': args.dropout,
-                      'loss': 'categorical_crossentropy'}
+                      'loss': 'categorical_crossentropy',
+                      'pad': 24,
+                      'overlap': 8}
 
-    network_fn = build_patchwise_vision_transformer
+    network_fn = build_MobileNetV3Small
 
     val_dset = to_dataset(val_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
                           class_mode='categorical', center=True, cache=args.cache)
@@ -405,10 +413,9 @@ def DOT_CV(args):
     if args.randAugment:
         train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
                                     num_parallel_calls=tf.data.AUTOTUNE, )
-    if args.convexAugment:
-        train_dset = generalized_bc_plus(train_dset, args.convex_dim, 8, args.convex_prob)
-    else:
-        train_dset = bc_plus(train_dset, 8)
+
+    # perform MSDA
+    train_dset = da_fn(train_dset, **da_args)
     # peek at the dataset instead of training
     if args.peek:
         explore_image_dataset(train_dset, 8)

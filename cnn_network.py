@@ -7,9 +7,677 @@ Jay Rothenberger (jay.c.rothenberger@ou.edu)
 
 import tensorflow as tf
 from tensorflow.keras.layers import Flatten, Conv2D, MaxPooling2D, Dense, Input, Concatenate, Dropout, SpatialDropout2D, \
-    MultiHeadAttention, Add, BatchNormalization
+    MultiHeadAttention, Add, BatchNormalization, LayerNormalization, Conv1D, Reshape, Cropping2D
 from time import time
 from inception import *
+from tensorflow.keras.applications import EfficientNetB0, ResNet50V2, VGG16, MobileNetV3Small
+
+
+def build_EfficientNetB0(image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy', n_classes=10, **kwargs):
+    inputs = Input(image_size)
+
+    model = EfficientNetB0(input_tensor=inputs, include_top=False)
+
+    outputs = Dense(n_classes, activation='softmax')(Flatten()(model.output))
+
+    model = tf.keras.models.Model(inputs=[inputs], outputs=[outputs])
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+    # compile the model
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_ResNet50V2(image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy', n_classes=10, **kwargs):
+    inputs = Input(image_size)
+
+    model = ResNet50V2(input_tensor=inputs, include_top=False)
+
+    outputs = Dense(n_classes, activation='softmax')(Flatten()(model.output))
+
+    model = tf.keras.models.Model(inputs=[inputs], outputs=[outputs])
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+    # compile the model
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_MobileNetV3Small(image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy', n_classes=10, **kwargs):
+    inputs = Input(image_size)
+
+    model = MobileNetV3Small(input_tensor=inputs, include_top=False)
+
+    outputs = Dense(n_classes, activation='softmax')(Flatten()(model.output))
+
+    model = tf.keras.models.Model(inputs=[inputs], outputs=[outputs])
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+    # compile the model
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_transformer_4(conv_filters,
+                        conv_size,
+                        attention_heads,
+                        image_size=(28, 28, 1),
+                        learning_rate=1e-3,
+                        n_classes=10,
+                        activation='selu',
+                        l1=None,
+                        l2=None,
+                        dropout=0,
+                        loss='sparse_categorical_crossentropy',
+                        pad=2, overlap=4, **kwargs):
+    conv_params = {
+        'use_bias': True,
+        'kernel_initializer': tf.keras.initializers.LecunNormal(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+    }
+    # other knobs to tune : pad, overlap, squeeze_dim
+    # define the input layer (required)
+    inputs = Input(image_size)
+    x = inputs
+    # set reference x separately to keep track of the input layer
+    # 1, create a list of lists of croppings
+
+    crops = []
+    row_breaks = range(0, x.shape[1] + (x.shape[1] % (conv_size[0] + pad)), conv_size[0] + pad)
+    col_breaks = range(0, x.shape[2] + (x.shape[2] % (conv_size[0] + pad)), conv_size[0] + pad)
+
+    for i, j in enumerate(row_breaks[:-1]):
+        new_crops = [((max(j - overlap, 0), max((x.shape[1] - row_breaks[i + 1]) - overlap, 0)),
+                      (max(l - overlap, 0), max((x.shape[2] - col_breaks[k + 1]) - overlap, 0)))
+                     for k, l in enumerate(col_breaks[:-1])]
+        for ci, ((top, bottom), (left, right)) in enumerate(new_crops):
+            height = image_size[0] - (left + right)
+            width = image_size[1] - (top + bottom)
+
+            desired_height = conv_size[0] + pad + 2*overlap
+            desired_width = conv_size[0] + pad + 2*overlap
+
+            if width < desired_width:
+                top -= (desired_width - width) if top > 0 else top
+                bottom -= (desired_width - width) if bottom > 0 else bottom
+            if height < desired_height:
+                left -= (desired_height - height) if left > 0 else left
+                right -= (desired_height - height) if right > 0 else right
+
+            new_crops[ci] = ((top, bottom), (left, right))
+
+        crops.append(new_crops)
+
+    crop_layers = []
+
+    for crop_list in crops:
+        crop_layers.append([])
+        for cropping in crop_list:
+            # 2, perform convolutions on each cropping
+            x_1 = Cropping2D(cropping)(x)
+            x_1 = Conv2D(filters=conv_filters[0], kernel_size=(conv_size[0], conv_size[0]),
+                         activation=activation, **conv_params)(x_1)
+            for (filters, kernel) in zip(conv_filters[1:], conv_size[1:]):
+                x_1 = SpatialDropout2D(dropout)(x_1)
+                if kernel > 1:
+                    x_1 = MaxPooling2D(strides=2, pool_size=2)(x_1)
+                x_1 = Conv2D(filters=filters, kernel_size=(kernel, kernel),
+                             activation=activation, **conv_params)(x_1)
+
+            crop_layers[-1].append(x_1)
+        # 3, concatenate along appropriate axes to create the desired volume
+        crop_layers[-1] = Concatenate(axis=2)(crop_layers[-1])
+    x = Concatenate(axis=1)(crop_layers)
+
+    print(attention_heads)
+    for i, heads in enumerate(attention_heads):
+        skip = x
+        # for all layers except the last one, we return sequences
+        key_dim = value_dim = max(x.shape[1], x.shape[-1] // 2)
+        if i == len(attention_heads) - 1:
+            # at the last layer of attention set the output to be a vector instead of a matrix
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout, output_shape=(1,))(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=2, kernel_size=(1, 1), **conv_params, activation=activation)(x)
+        else:
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout)(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=max(x.shape[1], x.shape[-1] // 2), kernel_size=(1, 1), **conv_params,
+                       activation=activation)(x)
+
+    x = Flatten()(x)
+
+    for i in range(n_classes, x.shape[1], (x.shape[1] - n_classes) // 2)[::-1]:
+        x = Dropout(dropout)(x)
+        x = Dense(min(i, 96), activation='selu', **conv_params)(x)
+
+    outputs = Dense(n_classes, activation=tf.keras.activations.softmax)(x)
+    # build the model
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'vit_model_{"%02d" % time()}')
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+    # compile the model
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_transformer_3(conv_filters,
+                        conv_size,
+                        attention_heads,
+                        image_size=(28, 28, 1),
+                        learning_rate=1e-3,
+                        n_classes=10,
+                        activation='selu',
+                        l1=None,
+                        l2=None,
+                        dropout=0,
+                        loss='sparse_categorical_crossentropy',
+                        pad=2, overlap=4, **kwargs):
+    conv_params = {
+        'use_bias': True,
+        'kernel_initializer': tf.keras.initializers.LecunNormal(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+    }
+    # other knobs to tune : pad, overlap, squeeze_dim
+    # define the input layer (required)
+    inputs = Input(image_size)
+    x = inputs
+    # set reference x separately to keep track of the input layer
+    # 1, create a list of lists of croppings
+
+    crops = []
+    row_breaks = range(0, x.shape[1] + (x.shape[1] % (conv_size[0] + pad)), conv_size[0] + pad)
+    col_breaks = range(0, x.shape[2] + (x.shape[2] % (conv_size[0] + pad)), conv_size[0] + pad)
+
+    for i, j in enumerate(row_breaks[:-1]):
+        new_crops = [((max(j - overlap, 0), max((x.shape[1] - row_breaks[i + 1]) - overlap, 0)),
+                      (max(l - overlap, 0), max((x.shape[2] - col_breaks[k + 1]) - overlap, 0)))
+                     for k, l in enumerate(col_breaks[:-1])]
+        for ci, ((top, bottom), (left, right)) in enumerate(new_crops):
+            height = image_size[0] - (left + right)
+            width = image_size[1] - (top + bottom)
+
+            desired_height = conv_size[0] + pad + 2*overlap
+            desired_width = conv_size[0] + pad + 2*overlap
+
+            if width < desired_width:
+                top -= (desired_width - width) if top > 0 else top
+                bottom -= (desired_width - width) if bottom > 0 else bottom
+            if height < desired_height:
+                left -= (desired_height - height) if left > 0 else left
+                right -= (desired_height - height) if right > 0 else right
+
+            new_crops[ci] = ((top, bottom), (left, right))
+
+        crops.append(new_crops)
+
+    crop_layers = []
+
+    for crop_list in crops:
+        crop_layers.append([])
+        for cropping in crop_list:
+            # 2, perform convolutions on each cropping
+            x_1 = Cropping2D(cropping)(x)
+            x_1 = Conv2D(filters=conv_filters[0], kernel_size=(conv_size[0], conv_size[0]),
+                         activation=activation, **conv_params)(x_1)
+            for (filters, kernel) in zip(conv_filters[1:], conv_size[1:]):
+                x_1 = SpatialDropout2D(dropout)(x_1)
+                x_1 = MaxPooling2D(strides=2, pool_size=2)(x_1)
+                x_1 = Conv2D(filters=filters, kernel_size=(kernel, kernel),
+                             activation=activation, **conv_params)(x_1)
+
+            crop_layers[-1].append(x_1)
+        # 3, concatenate along appropriate axes to create the desired volume
+        crop_layers[-1] = Concatenate(axis=2)(crop_layers[-1])
+    x = Concatenate(axis=1)(crop_layers)
+
+    print(attention_heads)
+    for i, heads in enumerate(attention_heads):
+        skip = x
+        # for all layers except the last one, we return sequences
+        key_dim = value_dim = max(x.shape[1], x.shape[-1] // 2)
+        if i == len(attention_heads) - 1:
+            # at the last layer of attention set the output to be a vector instead of a matrix
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout, output_shape=(1,))(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=2, kernel_size=(1, 1), **conv_params, activation=activation)(x)
+        else:
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout)(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=max(x.shape[1], x.shape[-1] // 2), kernel_size=(1, 1), **conv_params,
+                       activation=activation)(x)
+    # squeeze block
+    squeeze_dim = 32
+    y = x
+
+    x = Conv2D(squeeze_dim, (x.shape[1], 1), activation=activation, **conv_params)(x)
+    x = Reshape((squeeze_dim, x.shape[2], 1))(x)
+    x = Conv2D(squeeze_dim, (1, x.shape[2]), activation=activation, **conv_params)(x)
+
+    y = Conv2D(squeeze_dim, (1, y.shape[2]), activation=activation, **conv_params)(y)
+    y = Reshape((y.shape[1], squeeze_dim, 1))(y)
+    y = Conv2D(squeeze_dim, (y.shape[1], 1), activation=activation, **conv_params)(y)
+
+    y = Reshape((squeeze_dim, squeeze_dim, 1))(y)
+    x = Reshape((squeeze_dim, squeeze_dim, 1))(x)
+
+    x = Concatenate()([x, y])
+    x = Conv2D(1, (1, 1), activation=activation, **conv_params)(x)
+    # end squeeze block
+    x = Flatten()(x)
+
+    for i in range(n_classes, x.shape[1], (x.shape[1] - n_classes) // 2)[::-1]:
+        x = Dropout(dropout)(x)
+        x = Dense(min(i, 96), activation='selu', **conv_params)(x)
+
+    outputs = Dense(n_classes, activation=tf.keras.activations.softmax)(x)
+    # build the model
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'vit_model_{"%02d" % time()}')
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+    # compile the model
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_transformer_2(conv_filters,
+                        conv_size,
+                        attention_heads,
+                        image_size=(28, 28, 1),
+                        learning_rate=1e-3,
+                        n_classes=10,
+                        activation='selu',
+                        l1=None,
+                        l2=None,
+                        dropout=0,
+                        loss='sparse_categorical_crossentropy',
+                        pad=2, overlap=4, **kwargs):
+    conv_params = {
+        'use_bias': True,
+        'kernel_initializer': tf.keras.initializers.LecunNormal(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+    }
+    # other knobs to tune : pad, overlap, squeeze_dim
+    # define the input layer (required)
+    inputs = Input(image_size)
+    x = inputs
+    # set reference x separately to keep track of the input layer
+    # 1, create a list of lists of croppings
+
+    crops = []
+    row_breaks = range(0, x.shape[1], conv_size[0] + pad)
+    col_breaks = range(0, x.shape[2], conv_size[0] + pad)
+    for i, j in enumerate(row_breaks[:-1]):
+        crops.append([((max(j - overlap, 0), min((row_breaks[-1] - row_breaks[i + 1]) + overlap, x.shape[1])),
+                       (max(l - overlap, 0), min((col_breaks[-1] - col_breaks[k + 1]) + overlap, x.shape[2])))
+                      for k, l in enumerate(col_breaks[:-1])])
+
+    crop_layers = []
+
+    for crop_list in crops:
+        crop_layers.append([])
+        for cropping in crop_list:
+            # 2, perform convolutions on each cropping
+            x_1 = Cropping2D(cropping)(x)
+            for (filters, kernel) in zip(conv_filters, conv_size):
+                x_1 = Conv2D(filters=filters, kernel_size=(kernel, kernel),
+                             activation=activation, **conv_params)(x_1)
+            crop_layers[-1].append(x_1)
+        # 3, concatenate along appropriate axes to create the desired volume
+        crop_layers[-1] = Concatenate(axis=2)(crop_layers[-1])
+    x = Concatenate(axis=1)(crop_layers)
+
+    print(attention_heads)
+    for i, heads in enumerate(attention_heads):
+        skip = x
+        # for all layers except the last one, we return sequences
+        key_dim = value_dim = max(x.shape[1], x.shape[-1] // 2)
+        if i == len(attention_heads) - 1:
+            # at the last layer of attention set the output to be a vector instead of a matrix
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout, output_shape=(1,))(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=2, kernel_size=(1, 1), **conv_params, activation=activation)(x)
+        else:
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout)(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=max(x.shape[1], x.shape[-1] // 2), kernel_size=(1, 1), **conv_params,
+                       activation=activation)(x)
+    # squeeze block
+    squeeze_dim = 32
+    y = x
+
+    x = Conv2D(squeeze_dim, (x.shape[1], 1), activation=activation, **conv_params)(x)
+    x = Reshape((squeeze_dim, x.shape[2], 1))(x)
+    x = Conv2D(squeeze_dim, (1, x.shape[2]), activation=activation, **conv_params)(x)
+
+    y = Conv2D(squeeze_dim, (1, y.shape[2]), activation=activation, **conv_params)(y)
+    y = Reshape((y.shape[1], squeeze_dim, 1))(y)
+    y = Conv2D(squeeze_dim, (y.shape[1], 1), activation=activation, **conv_params)(y)
+
+    y = Reshape((squeeze_dim, squeeze_dim, 1))(y)
+    x = Reshape((squeeze_dim, squeeze_dim, 1))(x)
+
+    x = Concatenate()([x, y])
+    x = Conv2D(1, (1, 1), activation=activation, **conv_params)(x)
+    # end squeeze block
+    x = Flatten()(x)
+
+    for i in range(n_classes, x.shape[1], (x.shape[1] - n_classes) // 2)[::-1]:
+        x = Dropout(dropout)(x)
+        x = Dense(min(i, 96), activation='selu', **conv_params)(x)
+
+    outputs = Dense(n_classes, activation=tf.keras.activations.softmax)(x)
+    # build the model
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'vit_model_{"%02d" % time()}')
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+    # compile the model
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_transformer_1(conv_filters,
+                        conv_size,
+                        attention_heads,
+                        image_size=(28, 28, 1),
+                        learning_rate=1e-3,
+                        n_classes=10,
+                        activation='selu',
+                        l1=None,
+                        l2=None,
+                        dropout=0,
+                        loss='sparse_categorical_crossentropy', **kwargs):
+    conv_params = {
+        'use_bias': True,
+        'kernel_initializer': tf.keras.initializers.LecunNormal(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+    }
+    # other knobs to tune : pad, overlap, squeeze_dim
+    # define the input layer (required)
+    inputs = Input(image_size)
+    x = inputs
+    # set reference x separately to keep track of the input layer
+
+    import math
+    pad = math.ceil(max(x.shape[1], x.shape[2]) // 16)
+    overlap = 4
+    # 1, create a list of lists of croppings
+    for (filters, kernel) in zip(conv_filters, conv_size):
+        crops = []
+        row_breaks = range(0, x.shape[1], kernel + pad)
+        col_breaks = range(0, x.shape[2], kernel + pad)
+        for i, j in enumerate(row_breaks[:-1]):
+            crops.append([((max(j - overlap, 0), min((row_breaks[-1] - row_breaks[i + 1]) + overlap, x.shape[1])),
+                           (max(l - overlap, 0), min((col_breaks[-1] - col_breaks[k + 1]) + overlap, x.shape[2])))
+                          for k, l in enumerate(col_breaks[:-1])])
+
+        crop_layers = []
+
+        for crop_list in crops:
+            crop_layers.append([])
+            for cropping in crop_list:
+                # 2, perform convolutions on each cropping
+                x_1 = Cropping2D(cropping)(x)
+                x_1 = Conv2D(filters=filters, kernel_size=(kernel, kernel),
+                             activation=activation, **conv_params)(x_1)
+                crop_layers[-1].append(x_1)
+            # 3, concatenate along appropriate axes to create the desired volume
+            crop_layers[-1] = Concatenate(axis=2)(crop_layers[-1])
+        x = Concatenate(axis=1)(crop_layers)
+
+    print(attention_heads)
+    for i, heads in enumerate(attention_heads):
+        skip = x
+        # for all layers except the last one, we return sequences
+        key_dim = value_dim = max(x.shape[1], x.shape[-1] // 2)
+        if i == len(attention_heads) - 1:
+            # at the last layer of attention set the output to be a vector instead of a matrix
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout, output_shape=(1,))(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=2, kernel_size=(1, 1), **conv_params, activation=activation)(x)
+        else:
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout)(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=max(x.shape[1], x.shape[-1] // 2), kernel_size=(1, 1), **conv_params,
+                       activation=activation)(x)
+    # squeeze block
+    squeeze_dim = 32
+    y = x
+
+    x = Conv2D(squeeze_dim, (x.shape[1], 1), activation=activation, **conv_params)(x)
+    x = Reshape((squeeze_dim, x.shape[2], 1))(x)
+    x = Conv2D(squeeze_dim, (1, x.shape[2]), activation=activation, **conv_params)(x)
+
+    y = Conv2D(squeeze_dim, (1, y.shape[2]), activation=activation, **conv_params)(y)
+    y = Reshape((y.shape[1], squeeze_dim, 1))(y)
+    y = Conv2D(squeeze_dim, (y.shape[1], 1), activation=activation, **conv_params)(y)
+
+    y = Reshape((squeeze_dim, squeeze_dim, 1))(y)
+    x = Reshape((squeeze_dim, squeeze_dim, 1))(x)
+
+    x = Concatenate()([x, y])
+    x = Conv2D(1, (1, 1), activation=activation, **conv_params)(x)
+    # end squeeze block
+    x = Flatten()(x)
+
+    for i in range(n_classes, x.shape[1], (x.shape[1] - n_classes) // 2)[::-1]:
+        x = Dropout(dropout)(x)
+        x = Dense(min(i, 96), activation='selu', **conv_params)(x)
+
+    outputs = Dense(n_classes, activation=tf.keras.activations.softmax)(x)
+    # build the model
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'vit_model_{"%02d" % time()}')
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+    # compile the model
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_transformer_0(conv_filters,
+                        conv_size,
+                        attention_heads,
+                        image_size=(28, 28, 1),
+                        learning_rate=1e-3,
+                        n_classes=10,
+                        activation='selu',
+                        l1=None,
+                        l2=None,
+                        dropout=0,
+                        loss='sparse_categorical_crossentropy', **kwargs):
+    conv_params = {
+        'use_bias': True,
+        'kernel_initializer': tf.keras.initializers.LecunNormal(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+    }
+
+    # define the input layer (required)
+    inputs = Input(image_size)
+    x = inputs
+    # set reference x separately to keep track of the input layer
+    import math
+    layers = max(int(math.log(image_size[0], 3)), int(math.log(image_size[1], 3)))
+    lense_filters = 4 * x.shape[-1] * layers
+    for layer in range(layers):
+        # here we keep track of the input of each block
+        x = Conv2D(filters=lense_filters, kernel_size=(3, 3), **conv_params, padding='valid')(x)
+
+    # construct the convolutional block
+    for (filters, kernel) in zip(conv_filters, conv_size):
+        # here we keep track of the input of each block
+        x = Conv2D(filters=filters, kernel_size=(kernel, kernel), strides=(kernel, kernel), activation=activation,
+                   **conv_params, padding='same')(x)
+
+    print(attention_heads)
+    for i, heads in enumerate(attention_heads):
+        skip = x
+        # for all layers except the last one, we return sequences
+        key_dim = value_dim = max(x.shape[1], x.shape[-1] // 2)
+        if i == len(attention_heads) - 1:
+            # at the last layer of attention set the output to be a vector instead of a matrix
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout, output_shape=(1,))(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=2, kernel_size=(1, 1), **conv_params, activation=activation)(x)
+        else:
+            x = LayerNormalization()(x)
+            x = MultiHeadAttention(heads,
+                                   key_dim,
+                                   value_dim,
+                                   attention_axes=(2, 3),
+                                   kernel_regularizer=tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+                                   dropout=dropout)(x, x)
+            x = Concatenate()([skip, x])
+            x = Conv2D(filters=max(x.shape[1], x.shape[-1] // 2), kernel_size=(1, 1), **conv_params,
+                       activation=activation)(x)
+    # squeeze block
+    squeeze_dim = 32
+    y = x
+
+    x = Conv2D(squeeze_dim, (x.shape[1], 1), activation=activation, **conv_params)(x)
+    x = Reshape((squeeze_dim, x.shape[2], 1))(x)
+    x = Conv2D(squeeze_dim, (1, x.shape[2]), activation=activation, **conv_params)(x)
+
+    y = Conv2D(squeeze_dim, (1, y.shape[2]), activation=activation, **conv_params)(y)
+    y = Reshape((y.shape[1], squeeze_dim, 1))(y)
+    y = Conv2D(squeeze_dim, (y.shape[1], 1), activation=activation, **conv_params)(y)
+
+    y = Reshape((squeeze_dim, squeeze_dim, 1))(y)
+    x = Reshape((squeeze_dim, squeeze_dim, 1))(x)
+
+    x = Concatenate()([x, y])
+    x = Conv2D(1, (1, 1), activation=activation, **conv_params)(x)
+    # end squeeze block
+    x = Flatten()(x)
+
+    for i in range(n_classes, x.shape[1], (x.shape[1] - n_classes) // 2)[::-1]:
+        x = Dropout(dropout)(x)
+        x = Dense(min(i, 96), activation='selu', **conv_params)(x)
+
+    outputs = Dense(n_classes, activation=tf.keras.activations.softmax)(x)
+    # build the model
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'vit_model_{"%02d" % time()}')
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+    # compile the model
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
 
 
 def build_axial_transformer(conv_filters,
@@ -22,7 +690,7 @@ def build_axial_transformer(conv_filters,
                             l1=None,
                             l2=None,
                             dropout=0,
-                            loss='sparse_categorical_crossentropy'):
+                            loss='sparse_categorical_crossentropy', **kwargs):
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),
@@ -38,9 +706,9 @@ def build_axial_transformer(conv_filters,
     import math
     layers = max(int(math.log(image_size[0], 4)), int(math.log(image_size[1], 4)))
     lense_filters = 4 * x.shape[-1] * layers
-    for layer in range(layers + 3):
+    for layer in range(layers):
         # here we keep track of the input of each block
-        x = Conv2D(filters=lense_filters, kernel_size=(4, 4), **conv_params, padding='same', activation=activation)(x)
+        x = Conv2D(filters=lense_filters, kernel_size=(4, 4), **conv_params, padding='same')(x)
 
     # construct the convolutional block
     for (filters, kernel) in zip(conv_filters, conv_size):
@@ -55,7 +723,7 @@ def build_axial_transformer(conv_filters,
         key_dim = value_dim = max(x.shape[1], x.shape[-1] // 2)
         if i == len(attention_heads) - 1:
             # at the last layer of attention set the output to be a vector instead of a matrix
-            x = BatchNormalization()(x)
+            x = LayerNormalization()(x)
             x = MultiHeadAttention(heads,
                                    key_dim,
                                    value_dim,
@@ -65,7 +733,7 @@ def build_axial_transformer(conv_filters,
             x = Concatenate()([skip, x])
             x = Conv2D(filters=2, kernel_size=(1, 1), **conv_params, activation=activation)(x)
         else:
-            x = BatchNormalization()(x)
+            x = LayerNormalization()(x)
             x = MultiHeadAttention(heads,
                                    key_dim,
                                    value_dim,
@@ -78,8 +746,8 @@ def build_axial_transformer(conv_filters,
 
     x = Flatten()(x)
 
-    for i in range(n_classes, x.shape[-1], (x.shape[-1] - n_classes) // 3)[::-1]:
-        x = Dense(min(i, 128), activation='selu', **conv_params)(x)
+    for i in range(n_classes, x.shape[1], (x.shape[1] - n_classes) // 2)[::-1]:
+        x = Dense(min(i, 96), activation='selu', **conv_params)(x)
 
     outputs = Dense(n_classes, activation=tf.keras.activations.softmax)(x)
     # build the model
@@ -108,7 +776,7 @@ def build_vision_transformer(conv_filters,
                              l1=None,
                              l2=None,
                              dropout=0,
-                             loss='sparse_categorical_crossentropy'):
+                             loss='sparse_categorical_crossentropy', **kwargs):
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),
@@ -186,7 +854,7 @@ def build_patchwise_vision_transformer(conv_filters,
                                        l1=None,
                                        l2=None,
                                        dropout=0,
-                                       loss='sparse_categorical_crossentropy'):
+                                       loss='sparse_categorical_crossentropy', **kwargs):
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),
@@ -260,7 +928,7 @@ def build_sequential_model(conv_filters,
                            image_size=(28, 28, 1),
                            learning_rate=1e-3,
                            n_classes=10,
-                           activation='selu'):
+                           activation='selu', **kwargs):
     conv_params = {
         'activation': activation,
         'use_bias': True,
@@ -302,7 +970,7 @@ def build_functional_model(conv_filters,
                            image_size=(28, 28, 1),
                            learning_rate=1e-3,
                            n_classes=10,
-                           activation='selu'):
+                           activation='selu', **kwargs):
     conv_params = {
         'activation': activation,
         'use_bias': True,
@@ -352,7 +1020,7 @@ def build_parallel_functional_model(conv_filters,
                                     activation='selu',
                                     l1=None,
                                     l2=None,
-                                    dropout=None):
+                                    dropout=None, **kwargs):
     reg = tf.keras.regularizers.L1L2(l1=l1, l2=l2)
 
     conv_params = {
@@ -423,7 +1091,7 @@ def build_inception_model(conv_filters,
                           activation='selu',
                           l1=None,
                           l2=None,
-                          dropout=0):
+                          dropout=0, **kwargs):
     reg = tf.keras.regularizers.L1L2(l1=l1, l2=l2)
 
     conv_params = {
