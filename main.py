@@ -7,7 +7,7 @@ import argparse
 
 # code supplied locally
 from job_control import JobIterator
-from make_figure import *
+from cnn_network import *
 from data_structures import *
 from experiment import cifar10, cifar100, DOT_CV, DOT_CV_self_train
 
@@ -58,7 +58,7 @@ def create_parser():
                                                                           'only the new batch of labels is determined '
                                                                           'by the teacher')
     parser.add_argument('--distance_function', type=str, default='confidence', help='Determines k-nearest neighbors '
-                                                                                   'for pseudo-label production')
+                                                                                    'for pseudo-label production')
     parser.add_argument('--closest_to_labeled', action='store_true',
                         help='compute nearest neighbors only to the labeled set')
     # Data augmentation parameters
@@ -189,7 +189,7 @@ def exp_type_to_hyperparameters(args):
             'hidden': [[10, 10, 10]],
             'l1': [None],
             'l2': [None],
-            'dropout': [0.05],
+            'dropout': [0.2],
             'train_iterations': [20],
             'train_fraction': [1],
             'epochs': [512],
@@ -431,13 +431,16 @@ if __name__ == '__main__':
         'cifar100': cifar100,
         'control': DOT_CV
     }
+
     from data_generator import blended_dset, mixup_dset, bc_plus, generalized_bc_plus, to_dataset
+
     da_switch = {
         'blended': blended_dset,
         'mixup': mixup_dset,
-        'bc+':  bc_plus,
+        'bc+': bc_plus,
         'bc++': generalized_bc_plus,
     }
+
     da_args = {
         'n_blended': args.convex_dim,
         'prefetch': args.prefetch,
@@ -447,11 +450,97 @@ if __name__ == '__main__':
         'cache': args.cache
     }
 
+    network_switch = {
+        'self_train': {
+            'params': {'learning_rate': args.lrate,
+                       'conv_filters': args.filters,
+                       'conv_size': args.kernels,
+                       'attention_heads': args.hidden,
+                       'image_size': (256, 256, 3),
+                       'n_classes': 3,
+                       'l1': args.l1,
+                       'l2': args.l2,
+                       'dropout': args.dropout,
+                       'loss': 'categorical_crossentropy'},
+            'network_fn': build_transformer_4},
+
+        'da': {
+            'params':
+                {'learning_rate': args.lrate,
+                 'conv_filters': args.filters,
+                 'conv_size': args.kernels,
+                 'attention_heads': args.hidden,
+                 'image_size': (256, 256, 3),
+                 'n_classes': 3,
+                 'l1': args.l1,
+                 'l2': args.l2,
+                 'dropout': args.dropout,
+                 'loss': 'categorical_crossentropy',
+                 'pad': 24,
+                 'overlap': 8},
+            'network_fn': build_transformer_4},
+
+        'cifar10': {
+            'params': {'learning_rate': args.lrate,
+                       'conv_filters': args.filters,
+                       'conv_size': args.kernels,
+                       'attention_heads': args.hidden,
+                       'image_size': (32, 32, 3),
+                       'n_classes': 100,
+                       'l1': args.l1,
+                       'l2': args.l2,
+                       'dropout': args.dropout,
+                       'loss': 'categorical_crossentropy',
+                       'pad': 4,
+                       'overlap': 4,
+                       'skip_stride_cnt': 3},
+            'network_fn': build_kMobileNetV3},
+
+        'cifar100': {
+            'params': {'learning_rate': args.lrate,
+                       'conv_filters': args.filters,
+                       'conv_size': args.kernels,
+                       'attention_heads': args.hidden,
+                       'image_size': (32, 32, 3),
+                       'n_classes': 100,
+                       'l1': args.l1,
+                       'l2': args.l2,
+                       'dropout': args.dropout,
+                       'loss': 'categorical_crossentropy',
+                       'pad': 4,
+                       'overlap': 4,
+                       'skip_stride_cnt': 3},
+            'network_fn': build_kMobileNetV3},
+
+        'control': {
+            'params':
+                {'learning_rate': args.lrate,
+                 'conv_filters': args.filters,
+                 'conv_size': args.kernels,
+                 'attention_heads': args.hidden,
+                 'image_size': (256, 256, 3),
+                 'n_classes': 3,
+                 'l1': args.l1,
+                 'l2': args.l2,
+                 'dropout': args.dropout,
+                 'loss': 'categorical_crossentropy',
+                 'pad': 24,
+                 'overlap': 8},
+            'network_fn': build_transformer_4},
+    }
+
+
     def default(dset, **kwargs):
         return dset
+
 
     # takes: train_ds, n_blended, prefetch, prob, std, alpha
     da_fn = da_switch.get(args.convexAugment, default)
 
     exp_fn = switch.get(args.exp_type)
-    exp_fn(args, da_fn, da_args)
+
+    network = network_switch.get(args.exp_type, None)
+
+    network_fn, network_params = network['network_fn'], network['params']
+
+    exp_fn(args, da_fn, da_args, network_fn, network_params)

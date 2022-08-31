@@ -1,11 +1,11 @@
 import matplotlib.pyplot as plt
-from make_figure import get_train_fractions
+from make_figure import get_train_fractions, explore_image_dataset
 from data_structures import ModelData, ModelEvaluator, update_evaluator
 import os
 import numpy as np
 import tensorflow as tf
 
-from data_generator import get_dataframes_self_train, to_dataset
+from data_generator import get_dataframes_self_train, to_dataset, mixup_dset
 
 
 def varying_args(evaluator):
@@ -115,7 +115,15 @@ if __name__ == "__main__":
             print('NO GPU')
     prep_gpu(True)
 
-    evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/da/', fbase='')
+    """
+    dset = to_dataset(val_df, center=True)
+    dset = mixup_dset(dset)
+    explore_image_dataset(dset, 10)
+    exit()
+    """
+
+    evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/bigmodel/', fbase='')
+
     for model in evaluator.models:
         break
         print(model.args)

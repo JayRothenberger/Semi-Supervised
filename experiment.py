@@ -6,8 +6,9 @@ Contributor: Vincent A. Ferrera (vaflyers@gmail.com)
 import os
 import pickle
 import gc
+import tensorflow as tf
+from time import time
 # model-related code I have written (supplied locally)
-from cnn_network import *
 from data_structures import ModelData
 from data_generator import augment_with_neighbors, to_dataset, cifar10_dset, cifar100_dset, blended_dset, bc_plus,\
     generalized_bc_plus, load_unlabeled, get_cv_rotation, get_dataframes_self_train, mixup_dset
@@ -152,7 +153,8 @@ def start_training(args, model, train_dset, val_dset, network_fn, network_params
 
     callbacks = [tf.keras.callbacks.EarlyStopping(patience=args.patience,
                                                   restore_best_weights=True,
-                                                  min_delta=args.min_delta)]
+                                                  min_delta=args.min_delta,
+                                                  monitor='val_categorical_accuracy')]
 
     return execute_exp(args, model, train_dset, val_dset, network_fn, network_params,
                        0, train_steps, val_steps, callbacks=callbacks, evaluate_on=evaluate_on)
@@ -241,25 +243,11 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
         print('retraining: ', train_iteration)
 
 
-def cifar(args, da_fn, da_args, n_classes=10):
+def cifar(args, da_fn, da_args, network_fn, network_params, n_classes=10):
     # TODO: cross-validation
     image_size, n_classes = (32, 32), n_classes
 
-    network_params = {'learning_rate': args.lrate,
-                      'conv_filters': args.filters,
-                      'conv_size': args.kernels,
-                      'attention_heads': args.hidden,
-                      'image_size': (image_size[0], image_size[1], 3),
-                      'n_classes': n_classes,
-                      'l1': args.l1,
-                      'l2': args.l2,
-                      'dropout': args.dropout,
-                      'loss': 'categorical_crossentropy',
-                      'pad': 4,
-                      'overlap': 4}
-
     print('hidden', args.hidden)
-    network_fn = build_transformer_4
 
     switch = {
         10: cifar10_dset,
@@ -301,15 +289,15 @@ def cifar(args, da_fn, da_args, n_classes=10):
             pickle.dump(model_data, fp)
 
 
-def cifar10(args, da_fn, da_args):
-    cifar(args, da_fn, da_args, 10)
+def cifar10(args, da_fn, da_args, network_fn, network_params):
+    cifar(args, da_fn, da_args, network_fn, network_params, 10)
 
 
-def cifar100(args, da_fn, da_args):
-    cifar(args, da_fn, da_args, 100)
+def cifar100(args, da_fn, da_args, network_fn, network_params):
+    cifar(args, da_fn, da_args, network_fn, network_params, 100)
 
 
-def DOT_CV_self_train(args, da_fn, da_args):
+def DOT_CV_self_train(args, da_fn, da_args, network_fn, network_params):
     # TODO: cross-validation, peeking
     if args.peek:
         raise NotImplementedError('peeking is not implemented for this experiment type')
@@ -335,19 +323,6 @@ def DOT_CV_self_train(args, da_fn, da_args):
             [os.curdir + '/../data/' + path for path in paths],
             train_fraction=args.train_fraction)
 
-    network_params = {'learning_rate': args.lrate,
-                      'conv_filters': args.filters,
-                      'conv_size': args.kernels,
-                      'attention_heads': args.hidden,
-                      'image_size': (image_size[0], image_size[1], 3),
-                      'n_classes': n_classes,
-                      'l1': args.l1,
-                      'l2': args.l2,
-                      'dropout': args.dropout,
-                      'loss': 'categorical_crossentropy'}
-
-    network_fn = build_patchwise_vision_transformer
-
     def dataset_fn(df, train=False, cache=True):
         ds = to_dataset(df, shuffle=True, image_size=image_size, batch_size=args.batch, seed=42,
                         class_mode='categorical', cache=cache)
@@ -369,7 +344,7 @@ def DOT_CV_self_train(args, da_fn, da_args):
                evaluate_on=None)
 
 
-def DOT_CV(args, da_fn, da_args):
+def DOT_CV(args, da_fn, da_args, network_fn, network_params):
     image_size, n_classes = (256, 256), 3
 
     paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
@@ -386,21 +361,6 @@ def DOT_CV(args, da_fn, da_args):
         train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
             [os.curdir + '/../data/' + path for path in paths],
             train_fraction=args.train_fraction)
-
-    network_params = {'learning_rate': args.lrate,
-                      'conv_filters': args.filters,
-                      'conv_size': args.kernels,
-                      'attention_heads': args.hidden,
-                      'image_size': (image_size[0], image_size[1], 3),
-                      'n_classes': n_classes,
-                      'l1': args.l1,
-                      'l2': args.l2,
-                      'dropout': args.dropout,
-                      'loss': 'categorical_crossentropy',
-                      'pad': 24,
-                      'overlap': 8}
-
-    network_fn = build_MobileNetV3Small
 
     val_dset = to_dataset(val_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
                           class_mode='categorical', center=True, cache=args.cache)

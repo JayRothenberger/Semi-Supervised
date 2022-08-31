@@ -11,14 +11,33 @@ from tensorflow.keras.layers import Flatten, Conv2D, MaxPooling2D, Dense, Input,
 from time import time
 from inception import *
 from tensorflow.keras.applications import EfficientNetB0, ResNet50V2, VGG16, MobileNetV3Small
+import cai.layers
+import cai.datasets
+import cai.efficientnet
+import cai.mobilenet_v3
+import cai.util
 
 
-def build_EfficientNetB0(image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy', n_classes=10, **kwargs):
+def build_keras_application(application, image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy',
+                            n_classes=10, dropout=0, trainable_layers=4, **kwargs):
     inputs = Input(image_size)
 
-    model = EfficientNetB0(input_tensor=inputs, include_top=False)
+    try:
+        model = application(input_tensor=inputs, include_top=False, weights='imagenet', pooling='avg',
+                            include_preprocessing=False)
+    except TypeError as t:
+        # no preprocessing for ResNet
+        model = application(input_tensor=inputs, include_top=False, weights='imagenet', pooling='avg')
 
-    outputs = Dense(n_classes, activation='softmax')(Flatten()(model.output))
+    outputs = Dense(n_classes, activation='softmax')(Dropout(dropout)(Flatten()(model.output)))
+
+    for layer in model.layers:
+        layer.trainable = False
+
+    for layer in model.layers[::-1]:
+        if trainable_layers and len(layer.get_weights()) > 0:
+            layer.trainable = True
+            trainable_layers -= 1
 
     model = tf.keras.models.Model(inputs=[inputs], outputs=[outputs])
 
@@ -34,14 +53,35 @@ def build_EfficientNetB0(image_size=(256, 256, 3), learning_rate=1e-4, loss='cat
     return model
 
 
-def build_ResNet50V2(image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy', n_classes=10, **kwargs):
-    inputs = Input(image_size)
+def build_EfficientNetB0(**kwargs):
+    return build_keras_application(EfficientNetB0, **kwargs)
 
-    model = ResNet50V2(input_tensor=inputs, include_top=False)
 
-    outputs = Dense(n_classes, activation='softmax')(Flatten()(model.output))
+def build_ResNet50V2(**kwargs):
+    return build_keras_application(ResNet50V2, **kwargs)
 
-    model = tf.keras.models.Model(inputs=[inputs], outputs=[outputs])
+
+def build_MobileNetV3Small(**kwargs):
+    return build_keras_application(MobileNetV3Small, **kwargs)
+
+
+def build_keras_kapplication(application, image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy',
+                             n_classes=10, dropout=0, channels=16, **kwargs):
+
+    switch = {
+        12: cai.layers.D6_12ch(),
+        16: cai.layers.D6_16ch(),
+        32: cai.layers.D6_32ch()
+    }
+
+    model = application(include_top=True,
+                        alpha=1.0,
+                        minimalistic=False,
+                        input_shape=image_size,
+                        classes=n_classes,
+                        dropout_rate=dropout,
+                        drop_connect_rate=dropout,
+                        kType=switch.get(channels, cai.layers.D6_12ch()))
 
     opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
                                     beta_1=0.9, beta_2=0.999,
@@ -55,25 +95,16 @@ def build_ResNet50V2(image_size=(256, 256, 3), learning_rate=1e-4, loss='categor
     return model
 
 
-def build_MobileNetV3Small(image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy', n_classes=10, **kwargs):
-    inputs = Input(image_size)
+def build_kMobileNetV3(**kwargs):
+    return build_keras_kapplication(cai.mobilenet_v3.kMobileNetV3Large, channels=32, **kwargs)
 
-    model = MobileNetV3Small(input_tensor=inputs, include_top=False)
 
-    outputs = Dense(n_classes, activation='softmax')(Flatten()(model.output))
+def build_kMobileNet(**kwargs):
+    return build_keras_kapplication(cai.mobilenet.kMobileNet, channels=32, **kwargs)
 
-    model = tf.keras.models.Model(inputs=[inputs], outputs=[outputs])
 
-    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
-                                    beta_1=0.9, beta_2=0.999,
-                                    epsilon=None, decay=0.99)
-    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
-    # compile the model
-    model.compile(loss=loss,
-                  optimizer=opt,
-                  metrics=[accuracy])
-
-    return model
+def build_kEfficientNetB0(**kwargs):
+    return build_keras_kapplication(cai.efficientnet.kEfficientNetB0, **kwargs)
 
 
 def build_transformer_4(conv_filters,
@@ -114,8 +145,8 @@ def build_transformer_4(conv_filters,
             height = image_size[0] - (left + right)
             width = image_size[1] - (top + bottom)
 
-            desired_height = conv_size[0] + pad + 2*overlap
-            desired_width = conv_size[0] + pad + 2*overlap
+            desired_height = conv_size[0] + pad + 2 * overlap
+            desired_width = conv_size[0] + pad + 2 * overlap
 
             if width < desired_width:
                 top -= (desired_width - width) if top > 0 else top
@@ -238,8 +269,8 @@ def build_transformer_3(conv_filters,
             height = image_size[0] - (left + right)
             width = image_size[1] - (top + bottom)
 
-            desired_height = conv_size[0] + pad + 2*overlap
-            desired_width = conv_size[0] + pad + 2*overlap
+            desired_height = conv_size[0] + pad + 2 * overlap
+            desired_width = conv_size[0] + pad + 2 * overlap
 
             if width < desired_width:
                 top -= (desired_width - width) if top > 0 else top
