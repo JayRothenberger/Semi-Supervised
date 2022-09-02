@@ -151,10 +151,15 @@ def start_training(args, model, train_dset, val_dset, network_fn, network_params
 
     evaluate_on = dict() if evaluate_on is None else evaluate_on
 
+    def cyclic_schedule(index, length=25):
+        # 1e-5 -> 2.5e-4
+        return (index % length) * args.learning_rate
+
     callbacks = [tf.keras.callbacks.EarlyStopping(patience=args.patience,
                                                   restore_best_weights=True,
                                                   min_delta=args.min_delta,
-                                                  monitor='val_categorical_accuracy')]
+                                                  monitor='val_categorical_accuracy'),
+                 tf.keras.callbacks.LearningRateScheduler(cyclic_schedule)]
 
     return execute_exp(args, model, train_dset, val_dset, network_fn, network_params,
                        0, train_steps, val_steps, callbacks=callbacks, evaluate_on=evaluate_on)

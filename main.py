@@ -4,6 +4,7 @@ Experiment Management Code by Jay Rothenberger (jay.c.rothenberger@ou.edu)
 
 # code supplied by pip / conda
 import argparse
+from tensorflow import keras
 
 # code supplied locally
 from job_control import JobIterator
@@ -197,11 +198,11 @@ def exp_type_to_hyperparameters(args):
             'convex_prob': [.5],
             'steps_per_epoch': [1024],
             'patience': [5],
-            'batch': [196],
-            'lrate': [1e-4],
+            'batch': [2048],
+            'lrate': [1e-5],
             'randAugment': [False, True],
             'peek': [False],
-            'convexAugment': ['blended'],
+            'convexAugment': ['blended', 'mixup'],
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
