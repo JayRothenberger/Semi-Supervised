@@ -15,6 +15,8 @@ from data_generator import augment_with_neighbors, to_dataset, cifar10_dset, cif
 from transforms import custom_rand_augment_object
 from make_figure import explore_image_dataset
 
+import keras_tuner as kt
+
 
 def generate_fname(args):
     """
@@ -96,6 +98,25 @@ def execute_exp(args, model, train_dset, val_dset, network_fn, network_params, t
         print("NO GO")
         return
 
+    """    
+    def kt_wrapper(hp):
+        # defining a set of hyperparametrs for tuning and a range of values for each
+        learning_rate = hp.Float(name='learning_rate', min_value=1e-4, max_value=1e-2)
+        net_depth = hp.Int(name='net_depth', min_value=2, max_value=6)
+        dropout = hp.Boolean(name='dropout', default=False)
+        bn_after_act = hp.Boolean(name='bn_after_act', default=False)
+        activation = hp.Choice(name='activation', values=['mish', 'elu', 'lrelu'], ordered=False)
+
+        return network_fn(**network_params)
+
+    tuner = kt.Hyperband(network_fn,
+                         objective='val_categorical_accuracy',
+                         max_epochs=10,
+                         factor=3,
+                         directory='my_dir',
+                         project_name='intro_to_kt')
+    """
+
     # Learn
     #  steps_per_epoch: how many batches from the training set do we use for training in one epoch?
     #  validation_steps=None
@@ -151,15 +172,33 @@ def start_training(args, model, train_dset, val_dset, network_fn, network_params
 
     evaluate_on = dict() if evaluate_on is None else evaluate_on
 
-    def cyclic_schedule(index, length=25):
-        # 1e-5 -> 2.5e-4
-        return (index % length) * args.learning_rate
+    def bleed_out(index, lrate, minimum=1e-3):
+        # Oscillating learning rate schedule
+        # inspired by https://arxiv.org/abs/1506.01186
+        from math import sin, pi
+        x = index + 1
+        frac = (1 - minimum) / x**(1 - sin(2*pi*(x**.5)))
+        return min(args.lrate*(frac + minimum), 1)
+
+    def cyclical_adv_lrscheduler25(epoch, lrate):
+        """CAI Cyclical and Advanced Learning Rate Scheduler.
+        # Arguments
+            epoch: integer with current epoch count.
+        # Returns
+            float with desired learning rate.
+        """
+        base_learning = 0.001
+        local_epoch = epoch % 25
+        if local_epoch < 7:
+            return base_learning * (1 + 0.5 * local_epoch)
+        else:
+            return (base_learning * 4) * (0.85 ** (local_epoch - 7))
 
     callbacks = [tf.keras.callbacks.EarlyStopping(patience=args.patience,
                                                   restore_best_weights=True,
                                                   min_delta=args.min_delta,
                                                   monitor='val_categorical_accuracy'),
-                 tf.keras.callbacks.LearningRateScheduler(cyclic_schedule)]
+                 tf.keras.callbacks.LearningRateScheduler(bleed_out)]
 
     return execute_exp(args, model, train_dset, val_dset, network_fn, network_params,
                        0, train_steps, val_steps, callbacks=callbacks, evaluate_on=evaluate_on)
@@ -283,7 +322,9 @@ def cifar(args, da_fn, da_args, network_fn, network_params, n_classes=10):
         model = network_fn(**network_params)
     # train the model
     model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
-                                train_steps=args.steps_per_epoch, val_steps=10000 // args.batch)
+                                train_steps=args.steps_per_epoch,
+                                val_steps=int(val_dset.cardinality()),
+                                evaluate_on={'test': test_dset})
     # save the model
     try:
         with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:

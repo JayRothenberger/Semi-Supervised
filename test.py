@@ -51,9 +51,11 @@ def figure_metric_epoch(evaluator, title, fname, metric):
 
         # plot the metric v.s. epochs for each model
         r = float(np.random.uniform(0, 1, 1))
+        g = float(np.random.uniform(.25, .75, 1))
+        b = float(np.random.uniform(.25, .75, 1))
         try:
             # plot(metric, model.history[metric], (r, .25, .25))
-            plot('val_' + metric, model.history['val_' + metric], (r, model.args.convex_prob / 1.5, model.args.convex_dim / 5))
+            plot('val_' + metric, model.history['val_' + metric], (r, g, b))
         except:
             # plot('sparse_' + metric, model.history['sparse_' + metric], (r, .75, .25))
             plot('val_sparse_' + metric, model.history['val_sparse_' + metric], (r, .75, .75))
@@ -122,10 +124,12 @@ if __name__ == "__main__":
     exit()
     """
 
-    evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/bigmodel/', fbase='')
+    evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/cifar10/', fbase='')
+    from data_generator import cifar10_dset
+
+    train, val, test = cifar10_dset(batch_size=64)
 
     for model in evaluator.models:
-        break
         print(model.args)
 
         def get_model(model):
@@ -134,6 +138,11 @@ if __name__ == "__main__":
             k_model = model.network_fn(**model.network_params)
             k_model.set_weights(model.weights)
             return k_model
+
+        print(model.get_model().evaluate(val))
+        print(model.get_model().evaluate(test))
+        continue
+
         pgd_evaluation(
                        get_model(model),
                        to_dataset(val_df, batch_size=24, shuffle=True, class_mode='categorical'),

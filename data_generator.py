@@ -229,8 +229,8 @@ def cifar100_dset(path='./../cifar-100/', batch_size=32, prefetch=1, center=True
         train, val, test = train.cache(), val.cache(), test.cache()
 
     train, val, test = train.repeat().batch(batch_size).prefetch(prefetch), \
-                       val.repeat().batch(batch_size).prefetch(prefetch), \
-                       test.repeat().batch(batch_size).prefetch(prefetch)
+                       val.batch(batch_size).prefetch(prefetch), \
+                       test.batch(batch_size).prefetch(prefetch)
 
     return train, val, test
 
@@ -247,7 +247,7 @@ def cifar10_dset(path='./../cifar-10/', batch_size=32, prefetch=1, center=True, 
     with open(path + 'data_batch_4', 'rb') as fo:
         train.append(pickle.load(fo, encoding='bytes'))
     with open(path + 'data_batch_5', 'rb') as fo:
-        val = pickle.load(fo, encoding='bytes')
+        train.append(pickle.load(fo, encoding='bytes'))
     with open(path + 'test_batch', 'rb') as fo:
         test = pickle.load(fo, encoding='bytes')
 
@@ -260,11 +260,12 @@ def cifar10_dset(path='./../cifar-10/', batch_size=32, prefetch=1, center=True, 
         x_train.append(np.stack([re_ravel(i) for i in batch[b'data']]))
         y_train.append(np.stack(batch[b'labels']))
     x_train, y_train = np.concatenate(x_train), np.concatenate(y_train)
+    print('cifar10:', len(y_train), 'training examples')
 
-    x_test = np.stack([np.reshape(i, (32, 32, 3), 'F') for i in test[b'data']])
+    x_test = np.stack([re_ravel(i) for i in test[b'data']])
     y_test = np.stack(test[b'labels'])
 
-    x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=.2, shuffle=True, random_state=42)
+    x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=.1, shuffle=False, random_state=42)
 
     train, val, test = tf.data.Dataset.from_tensor_slices((x_train, y_train)), \
                        tf.data.Dataset.from_tensor_slices((x_val, y_val)), \
@@ -299,8 +300,8 @@ def cifar10_dset(path='./../cifar-10/', batch_size=32, prefetch=1, center=True, 
         train, val, test = train.cache(), val.cache(), test.cache()
 
     train, val, test = train.repeat().batch(batch_size).prefetch(prefetch), \
-                       val.repeat().batch(batch_size).prefetch(prefetch), \
-                       test.repeat().batch(batch_size).prefetch(prefetch)
+                       val.batch(batch_size).prefetch(prefetch), \
+                       test.batch(batch_size).prefetch(prefetch)
 
     return train, val, test
 

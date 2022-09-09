@@ -44,6 +44,8 @@ def build_keras_application(application, image_size=(256, 256, 3), learning_rate
     opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
                                     beta_1=0.9, beta_2=0.999,
                                     epsilon=None, decay=0.99)
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
     accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
     # compile the model
     model.compile(loss=loss,
@@ -66,7 +68,22 @@ def build_MobileNetV3Small(**kwargs):
 
 
 def build_keras_kapplication(application, image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy',
-                             n_classes=10, dropout=0, channels=16, **kwargs):
+                             n_classes=10, dropout=0, channels=16, skip_stride_cnt=0, **kwargs):
+
+    """
+    in order to get this to work I have made several changes to my training procedure
+
+    1. learning rate is now cyclic
+    2. optimizer is now RMSProp
+    3. learning rate is now 1e-3
+    4. batch size is now 64
+    5. dropout is now .2
+    6. now using the loss-scale optimizer
+    7. now using a less stinky learning rate schedule
+    8. less validation data
+    9. skipping pooling steps for cifar
+
+    """
 
     switch = {
         12: cai.layers.D6_12ch(),
@@ -81,11 +98,15 @@ def build_keras_kapplication(application, image_size=(256, 256, 3), learning_rat
                         classes=n_classes,
                         dropout_rate=dropout,
                         drop_connect_rate=dropout,
-                        kType=switch.get(channels, cai.layers.D6_12ch()))
+                        kType=switch.get(channels, cai.layers.D6_12ch()),
+                        skip_stride_cnt=skip_stride_cnt)
 
     opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
                                     beta_1=0.9, beta_2=0.999,
                                     epsilon=None, decay=0.99)
+    opt = tf.keras.optimizers.RMSprop(learning_rate)
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
     accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
     # compile the model
     model.compile(loss=loss,
@@ -96,6 +117,23 @@ def build_keras_kapplication(application, image_size=(256, 256, 3), learning_rat
 
 
 def build_kMobileNetV3(**kwargs):
+    """
+            'cifar10': {
+            'params': {'learning_rate': args.lrate,
+                       'conv_filters': args.filters,
+                       'conv_size': args.kernels,
+                       'attention_heads': args.hidden,
+                       'image_size': (32, 32, 3),
+                       'n_classes': 10,
+                       'l1': args.l1,
+                       'l2': args.l2,
+                       'dropout': args.dropout,
+                       'loss': 'categorical_crossentropy',
+                       'pad': 4,
+                       'overlap': 4,
+                       'skip_stride_cnt': 3},
+            'network_fn': build_kMobileNetV3},
+    """
     return build_keras_kapplication(cai.mobilenet_v3.kMobileNetV3Large, channels=32, **kwargs)
 
 
@@ -222,6 +260,8 @@ def build_transformer_4(conv_filters,
     opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
                                     beta_1=0.9, beta_2=0.999,
                                     epsilon=None, decay=0.99)
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
     accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
     # compile the model
     model.compile(loss=loss,

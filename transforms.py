@@ -456,6 +456,20 @@ def rotate(image: tf.Tensor, range: float) -> tf.Tensor:
     return from_4d(image, original_ndims)
 
 
+def flip_ud(image: tf.Tensor, range: float) -> tf.Tensor:
+    if np.random.uniform(0, 1, 1) < range:
+        return tf.image.flip_up_down(image)
+    else:
+        return image
+
+
+def flip_lr(image: tf.Tensor, range: float) -> tf.Tensor:
+    if np.random.uniform(0, 1, 1) < range:
+        return tf.image.flip_left_right(image)
+    else:
+        return image
+
+
 def rand_augment_object(M, N, leq_M=False):
     """
     :param M: global magnitude parameter over all transformations (1 is max, 0 is min)
@@ -496,7 +510,7 @@ def custom_rand_augment_object(M, N, leq_M=False):
         :param img: image to augment
         :return: augmented image
         """
-        transforms = [identity, rotate, shear_x, shear_y, translate_x, translate_y]
+        transforms = [identity, rotate, shear_x, shear_y, translate_x, translate_y, flip_lr]
         # needs to take a rank 3 numpy tensor, and return a tensor of the same rank
         for op in np.random.choice(transforms, N):
             img = op(img, np.random.uniform(0, M)) if leq_M else op(img, M)
