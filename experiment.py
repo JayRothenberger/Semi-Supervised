@@ -10,7 +10,7 @@ import tensorflow as tf
 from time import time
 # model-related code I have written (supplied locally)
 from data_structures import ModelData
-from data_generator import augment_with_neighbors, to_dataset, cifar10_dset, cifar100_dset, blended_dset, bc_plus,\
+from data_generator import augment_with_neighbors, to_dataset, cifar10_dset, cifar100_dset, blended_dset, bc_plus, \
     generalized_bc_plus, load_unlabeled, get_cv_rotation, get_dataframes_self_train, mixup_dset
 from transforms import custom_rand_augment_object
 from make_figure import explore_image_dataset
@@ -89,6 +89,14 @@ def execute_exp(args, model, train_dset, val_dset, network_fn, network_params, t
     fbase = generate_fname(args)
 
     print(fbase)
+
+    if vars(args).get('util', False):
+        print('returning datasets')
+        return train_dset, val_dset, callbacks
+    if args.hyperband:
+        print('returning model')
+        return model
+
     print(model.summary())
     tf.keras.utils.plot_model(model, show_shapes=True, show_layer_names=True, expand_nested=True,
                               to_file=os.curdir + f'/../visualizations/models/model_{str(time())[:6]}.png')
@@ -97,25 +105,6 @@ def execute_exp(args, model, train_dset, val_dset, network_fn, network_params, t
         # No!
         print("NO GO")
         return
-
-    """    
-    def kt_wrapper(hp):
-        # defining a set of hyperparametrs for tuning and a range of values for each
-        learning_rate = hp.Float(name='learning_rate', min_value=1e-4, max_value=1e-2)
-        net_depth = hp.Int(name='net_depth', min_value=2, max_value=6)
-        dropout = hp.Boolean(name='dropout', default=False)
-        bn_after_act = hp.Boolean(name='bn_after_act', default=False)
-        activation = hp.Choice(name='activation', values=['mish', 'elu', 'lrelu'], ordered=False)
-
-        return network_fn(**network_params)
-
-    tuner = kt.Hyperband(network_fn,
-                         objective='val_categorical_accuracy',
-                         max_epochs=10,
-                         factor=3,
-                         directory='my_dir',
-                         project_name='intro_to_kt')
-    """
 
     # Learn
     #  steps_per_epoch: how many batches from the training set do we use for training in one epoch?
@@ -144,6 +133,7 @@ def execute_exp(args, model, train_dset, val_dset, network_fn, network_params, t
                            train_fraction=args.train_fraction,
                            train_iteration=train_iteration,
                            args=args)
+    print('returning model data')
     return model_data
 
 
@@ -177,8 +167,8 @@ def start_training(args, model, train_dset, val_dset, network_fn, network_params
         # inspired by https://arxiv.org/abs/1506.01186
         from math import sin, pi
         x = index + 1
-        frac = (1 - minimum) / x**(1 - sin(2*pi*(x**.5)))
-        return min(args.lrate*(frac + minimum), 1)
+        frac = (1 - minimum) / x ** (1 - sin(2 * pi * (x ** .5)))
+        return min(args.lrate * (frac + minimum), 1)
 
     def cyclical_adv_lrscheduler25(epoch, lrate):
         """CAI Cyclical and Advanced Learning Rate Scheduler.
@@ -287,6 +277,11 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
         print('retraining: ', train_iteration)
 
 
+def get_dsets(fn, args, da_fn, da_args):
+    train_dset, val_dset, callbacks = fn(args, da_fn, da_args, print, {})
+    return train_dset, val_dset, callbacks
+
+
 def cifar(args, da_fn, da_args, network_fn, network_params, n_classes=10):
     # TODO: cross-validation
     image_size, n_classes = (32, 32), n_classes
@@ -320,11 +315,19 @@ def cifar(args, da_fn, da_args, network_fn, network_params, n_classes=10):
             model = network_fn(**network_params)
     else:
         model = network_fn(**network_params)
+
+    if args.hyperband:
+        return start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                              train_steps=args.steps_per_epoch,
+                              val_steps=int(val_dset.cardinality()),
+                              evaluate_on={'test': test_dset})
+
     # train the model
     model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
                                 train_steps=args.steps_per_epoch,
                                 val_steps=int(val_dset.cardinality()),
                                 evaluate_on={'test': test_dset})
+
     # save the model
     try:
         with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
@@ -336,17 +339,17 @@ def cifar(args, da_fn, da_args, network_fn, network_params, n_classes=10):
 
 
 def cifar10(args, da_fn, da_args, network_fn, network_params):
-    cifar(args, da_fn, da_args, network_fn, network_params, 10)
+    return cifar(args, da_fn, da_args, network_fn, network_params, 10)
 
 
 def cifar100(args, da_fn, da_args, network_fn, network_params):
-    cifar(args, da_fn, da_args, network_fn, network_params, 100)
+    return cifar(args, da_fn, da_args, network_fn, network_params, 100)
 
 
 def DOT_CV_self_train(args, da_fn, da_args, network_fn, network_params):
-    # TODO: cross-validation, peeking
-    if args.peek:
-        raise NotImplementedError('peeking is not implemented for this experiment type')
+    # TODO: cross-validation, peeking, hyperband
+    if args.cross_validate or args.peek or args.hyperband:
+        raise NotImplementedError('cross-validation, peeking, hyperband not implemented')
 
     image_size, n_classes = (256, 256), 3
 
@@ -434,6 +437,11 @@ def DOT_CV(args, da_fn, da_args, network_fn, network_params):
             model = network_fn(**network_params)
     else:
         model = network_fn(**network_params)
+
+    if args.hyperband:
+        return start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                              train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
+
     # train the model
     model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
                                 train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)

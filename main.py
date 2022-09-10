@@ -5,12 +5,14 @@ Experiment Management Code by Jay Rothenberger (jay.c.rothenberger@ou.edu)
 # code supplied by pip / conda
 import argparse
 from tensorflow import keras
+import keras_tuner as kt
+from copy import deepcopy as copy
 
 # code supplied locally
 from job_control import JobIterator
 from cnn_network import *
 from data_structures import *
-from experiment import cifar10, cifar100, DOT_CV, DOT_CV_self_train
+from experiment import cifar10, cifar100, DOT_CV, DOT_CV_self_train, get_dsets
 
 
 def create_parser():
@@ -42,6 +44,7 @@ def create_parser():
     parser.add_argument('--cv_k', type=int, default=4, help='positive int - number of rotations of cross-validation')
     parser.add_argument('--cross_validate', action='store_true', help='Perform k-fold cross-validation')
     parser.add_argument('--cache', action='store_true', help='cache the dataset in memory')
+    parser.add_argument('--hyperband', action='store_true', help='Perform hyperband hyperparameter search')
 
     # Semi-supervised parameters
     parser.add_argument('--train_fraction', type=float, default=0.05, help="fraction of available training data to use")
@@ -190,7 +193,7 @@ def exp_type_to_hyperparameters(args):
             'hidden': [[10, 10, 10]],
             'l1': [None],
             'l2': [None],
-            'dropout': [0.2],
+            'dropout': [0.1*i for i in range(10)],
             'train_iterations': [20],
             'train_fraction': [1],
             'epochs': [512],
@@ -198,7 +201,7 @@ def exp_type_to_hyperparameters(args):
             'convex_prob': [.5],
             'steps_per_epoch': [1024],
             'patience': [32],
-            'batch': [64, 256],
+            'batch': [64],
             'lrate': [3e-3],
             'randAugment': [True],
             'peek': [False],
@@ -206,6 +209,7 @@ def exp_type_to_hyperparameters(args):
             'cross_validate': [False],
             'rand_M': [.3],
             'rand_N': [1],
+            'search_space': {'dropout': True}
         },
         'da': {
             'filters': [[12, 24, 48, 64, 64]],
@@ -258,9 +262,10 @@ def augment_args(args):
     index = args.exp
     if index is None:
         return ""
-
     # Create the iterator
-    ji = JobIterator(p)
+    ji = JobIterator({key: p[key] for key in set(p) - set(p['search_space']) - {'search_space'}}) \
+        if args.hyperband else JobIterator(p)
+
     print("Total jobs:", ji.get_njobs())
 
     # Check bounds
@@ -270,7 +275,12 @@ def augment_args(args):
     print(ji.get_index(args.exp))
 
     # Push the attributes to the args object and return a string that describes these structures
-    return ji.set_attributes_by_index(args.exp, args)
+    augmented, arg_str = ji.set_attributes_by_index(args.exp, args)
+    if args.hyperband:
+        vars(augmented).update({key: p[key] for key in p['search_space']})
+        vars(augmented).update({'search_space': p['search_space']})
+
+    return augmented, arg_str
 
 
 def prep_gpu(index, gpu=False, style='a100'):
@@ -298,6 +308,8 @@ def prep_gpu(index, gpu=False, style='a100'):
     if n_physical_devices > 1:
         for physical_device in physical_devices:
             tf.config.experimental.set_memory_growth(physical_device, True)
+        print('We have %d GPUs\n' % n_physical_devices)
+    elif n_physical_devices:
         print('We have %d GPUs\n' % n_physical_devices)
     else:
         print('NO GPU')
@@ -417,41 +429,8 @@ def generate_fname(args):
         str(time()).replace('.', '')[-6:])
 
 
-if __name__ == '__main__':
-    # Parse and check incoming arguments
-    parser = create_parser()
-    args = parser.parse_args()
-    args, args_str = augment_args(args)
-
-    prep_gpu(args.exp, args.gpu, style=args.gpu_type)
-
+def network_switch(args, key, default):
     switch = {
-        'self_train': DOT_CV_self_train,
-        'da': DOT_CV,
-        'cifar10': cifar10,
-        'cifar100': cifar100,
-        'control': DOT_CV
-    }
-
-    from data_generator import blended_dset, mixup_dset, bc_plus, generalized_bc_plus, to_dataset
-
-    da_switch = {
-        'blended': blended_dset,
-        'mixup': mixup_dset,
-        'bc+': bc_plus,
-        'bc++': generalized_bc_plus,
-    }
-
-    da_args = {
-        'n_blended': args.convex_dim,
-        'prefetch': args.prefetch,
-        'prob': args.convex_prob,
-        'std': .05,
-        'alpha': args.convex_prob,
-        'cache': args.cache
-    }
-
-    network_switch = {
         'self_train': {
             'params': {'learning_rate': args.lrate,
                        'conv_filters': args.filters,
@@ -492,7 +471,7 @@ if __name__ == '__main__':
                        'l2': args.l2,
                        'dropout': args.dropout,
                        'loss': 'categorical_crossentropy',
-                       'pad': 0,
+                       'pad': 1,
                        'overlap': 4,
                        'skip_stride_cnt': 3},
             'network_fn': build_transformer_4},
@@ -530,18 +509,99 @@ if __name__ == '__main__':
             'network_fn': build_transformer_4},
     }
 
+    return switch.get(key, default)
+
+
+if __name__ == '__main__':
+    # Parse and check incoming arguments
+    parser = create_parser()
+    args = parser.parse_args()
+    args, args_str = augment_args(args)
+
+    prep_gpu(args.exp, args.gpu, style=args.gpu_type)
+
+    switch = {
+        'self_train': DOT_CV_self_train,
+        'da': DOT_CV,
+        'cifar10': cifar10,
+        'cifar100': cifar100,
+        'control': DOT_CV
+    }
+
+    from data_generator import blended_dset, mixup_dset, bc_plus, generalized_bc_plus, to_dataset
+
+    da_switch = {
+        'blended': blended_dset,
+        'mixup': mixup_dset,
+        'bc+': bc_plus,
+        'bc++': generalized_bc_plus,
+    }
+
+    da_args = {
+        'n_blended': args.convex_dim,
+        'prefetch': args.prefetch,
+        'prob': args.convex_prob,
+        'std': .05,
+        'alpha': args.convex_prob,
+        'cache': args.cache
+    }
 
     def default(dset, **kwargs):
         return dset
-
 
     # takes: train_ds, n_blended, prefetch, prob, std, alpha
     da_fn = da_switch.get(args.convexAugment, default)
 
     exp_fn = switch.get(args.exp_type)
 
-    network = network_switch.get(args.exp_type, None)
+    network = network_switch(args, args.exp_type, None)
 
     network_fn, network_params = network['network_fn'], network['params']
 
-    exp_fn(args, da_fn, da_args, network_fn, network_params)
+    if args.hyperband:
+        vars(args)['util'] = True
+        train_dset, val_dset, callbacks = get_dsets(exp_fn, args, da_fn, da_args)
+        vars(args)['util'] = False
+
+        def hyperband_wrapper(args, da_args):
+            # convert network params and search space to an acceptable function format
+            def hyperband_fn(hp):
+
+                special_args = copy(args)
+                for key in args.search_space:
+                    vars(special_args)[key] = hp.Choice(name=key, values=vars(special_args)[key],
+                                                        ordered=args.search_space[key])
+
+                print(special_args.dropout)
+
+                network = network_switch(special_args, args.exp_type, None)
+
+                network_fn, network_params = network['network_fn'], network['params']
+
+                return exp_fn(special_args, da_fn, da_args, network_fn, network_params)
+
+            return hyperband_fn
+
+
+        hypermodel = hyperband_wrapper(args, da_args)
+
+        tuner = kt.Hyperband(hypermodel=hypermodel,
+                             objective=kt.Objective("val_categorical_accuracy", direction="max"),
+                             max_epochs=10,
+                             project_name='hyperband_tuner')
+
+        tuner.search(train_dset,
+                     steps_per_epoch=args.steps_per_epoch,
+                     validation_data=val_dset,
+                     validation_steps=int(val_dset.cardinality()),
+                     epochs=args.epochs,
+                     shuffle=False,
+                     callbacks=callbacks,
+                     initial_epoch=0,
+                     use_multiprocessing=True,
+                     workers=tf.config.threading.get_inter_op_parallelism_threads())
+
+        print(tuner.results_summary())
+        exit(0)
+    else:
+        exp_fn(args, da_fn, da_args, network_fn, network_params)
