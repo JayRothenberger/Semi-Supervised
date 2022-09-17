@@ -2,9 +2,11 @@ import os
 import pandas as pd
 import numpy as np
 import tensorflow as tf
+import math
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from time import perf_counter as perf_time
+from transforms import *
 
 # I included this because when I didn't I got an error.
 from PIL import Image, ImageFile
@@ -725,3 +727,162 @@ def generalized_bc_plus(train_ds, n_blended=2, prefetch=4, alpha=.25, **kwargs):
                           num_parallel_calls=tf.data.AUTOTUNE).prefetch(prefetch)
 
     return dataset
+
+
+def random_weighting(n):
+    # get a random weighting chosen uniformly from the convex hull of the unit vectors.
+    samp = -1 * np.log(np.random.uniform(0, 1, n))
+    samp /= np.sum(samp)
+    return np.array(samp)
+
+
+def arithmetic_blend(x, x_1, alpha=1.0):
+    """
+     sum a batch along the batch dimension weighted by a uniform random vector from the n simplex
+      (convex hull of unit vectors)
+    """
+    rng = np.random.default_rng()
+    weights = rng.dirichlet((alpha, alpha), 1)[0]
+
+    x = np.stack([x, x_1])
+
+    weights = np.array(weights, dtype=np.double).reshape(-1, 1)
+    # sum along the 0th dimension weighted by weights
+    x = tf.tensordot(weights, tf.cast(x, tf.double), (0, 0))[0]
+    # return the convex combination
+    return tf.cast(x, tf.float32)
+
+
+def geometric_blend(x, x_1, alpha=1.0):
+    """
+     multiply two batches along the first dimension weighted by a uniform random vector from the n simplex
+      (convex hull of unit vectors)
+    then take the square root
+    """
+    x = x - tf.reduce_min(x)
+    x_1 = x_1 - tf.reduce_min(x_1)
+
+    x = x / tf.reduce_max(x)
+    x_1 = x_1 / tf.reduce_max(x_1)
+
+    rng = np.random.default_rng()
+    weights = rng.dirichlet((alpha, alpha), 1)[0]
+    w_0, w_1 = weights
+
+    x = tf.pow(x, w_0)
+    x_1 = tf.pow(x_1, w_1)
+
+    x = tf.math.multiply(x, x_1)
+    x = tf.pow(x, tf.cast(1.0 / tf.reduce_sum(weights), tf.float32))
+
+    x = x - tf.reduce_mean(x)
+    # return the convex combination
+    return tf.cast(x, tf.float32)
+
+
+def add_gaussian_noise(x, y, std=0.01):
+    return x + tf.random.normal(shape=x.shape, mean=0.0, stddev=std, dtype=tf.float32), tf.cast(y, tf.float32)
+
+
+def custom_rand_augment(x, y, M=.2, N=1, alpha=1.0):
+    """
+    performs random augmentation with magnitude M for N iterations
+
+    :param img: image to augment
+    :return: augmented image
+    """
+    blend_fns = [arithmetic_blend, geometric_blend]
+    transforms = [identity, rotate, shear_x, shear_y, translate_x, translate_y, flip_lr]
+    # needs to take a rank 3 numpy tensor, and return a tensor of the same rank
+    for op in np.random.choice(transforms, N):
+        x_1 = op(x, np.random.uniform(0, M))
+        for fn in np.random.choice(blend_fns, 1):
+            x = fn(x_1, x, alpha)
+    return x, y
+
+
+def fftfreqnd(h, w):
+    """ Get bin values for discrete fourier transform of size (h, w, z)
+    :param h: Required, first dimension size
+    :param w: Optional, second dimension size
+    :param z: Optional, third dimension size
+    """
+    fz = fx = 0
+    fy = np.fft.fftfreq(h)
+
+    fy = np.expand_dims(fy, -1)
+
+    if w % 2 == 1:
+        fx = np.fft.fftfreq(w)[: w // 2 + 2]
+    else:
+        fx = np.fft.fftfreq(w)[: w // 2 + 1]
+
+    return tf.math.sqrt(fx * fx + fy * fy)
+
+
+def get_spectrum(freqs, decay_power, ch, h, w=0, z=0):
+    """ Samples a fourier image with given size and frequencies decayed by decay power
+    :param freqs: Bin values for the discrete fourier transform
+    :param decay_power: Decay power for frequency decay prop 1/f**d
+    :param ch: Number of channels for the resulting mask
+    :param h: Required, first dimension size
+    :param w: Optional, second dimension size
+    :param z: Optional, third dimension size
+    """
+    scale = np.ones(1) / (np.maximum(freqs, np.array([1. / max(w, h, z)])) ** decay_power)
+
+    param_size = (ch, *freqs.shape,  2)
+    param = tf.random.normal(tuple(param_size), dtype=tf.double)
+
+    scale = tf.expand_dims(scale, -1)[None, :]
+
+    return scale * tf.cast(param, tf.double)
+
+
+def fuzzy_fmix(x, y, alpha=1.0, delta=3):
+
+    shape = (x.shape[-3], x.shape[-2])
+
+    freqs = fftfreqnd(*shape)
+    spectrum = get_spectrum(freqs, delta, x.shape[-1], *shape)
+    spectrum = tf.dtypes.complex(spectrum[:, 0], spectrum[:, 1])
+    mask = np.real(np.fft.irfftn(spectrum, shape))
+
+    mask = mask[:1, :shape[0], :shape[1]]
+
+    mask = (mask - tf.reduce_min(mask))
+    mask = mask / tf.reduce_max(mask)
+
+    mask = np.moveaxis(mask, 0, -1)
+    mask = tf.stack([mask for i in range(x.shape[1])])
+    mask = tf.stack([mask, 1 - mask])
+
+    weights = np.array([tf.reduce_mean(mask), tf.reduce_mean(1 - mask)])
+
+    x = tf.multiply(mask, tf.cast(x, tf.double))
+
+    x = tf.reduce_sum(x, axis=0)
+    y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))
+
+    x, y = tf.cast(x, tf.float32), tf.cast(y, tf.float32)
+
+    return x, y
+
+
+def fast_fourier_fuckup(train_ds, n_blended=2, prefetch=4, M=.3, N=1, alpha=1.0, **kwargs):
+    n = 2
+
+    dataset = train_ds.map(
+        lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, .01], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE)
+
+    # dataset is now a dataset of (batch size, width, height, channels)
+
+    dataset = dataset.map(
+        lambda x, y: tf.py_function(custom_rand_augment, inp=[x, y, M, N], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE).batch(n_blended)
+
+    dataset = dataset.map(lambda x, y: tf.py_function(fuzzy_fmix, inp=[x, y], Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE)
+
+    return dataset.prefetch(prefetch)

@@ -30,27 +30,24 @@ def generate_fname(args):
     :return: a string (file name prefix)
     """
     # network parameters
-    hidden_str = '_'.join([str(i) for i in args.hidden])
-    filters_str = '_'.join([str(i) for i in args.filters])
-    kernels_str = '_'.join([str(i) for i in args.kernels])
+    hidden_str = '_'.join([str(i) for i in args.hidden]) if not isinstance(args.hidden, str) else args.hidden
+    filters_str = '_'.join([str(i) for i in args.filters]) if not isinstance(args.filters, str) else args.filters
+    kernels_str = '_'.join([str(i) for i in args.kernels]) if not isinstance(args.kernels, str) else args.kernels
 
-    # Label
-    if args.label is None:
-        label_str = ""
-    else:
-        label_str = "%s_" % args.label
-
-    # Experiment type
-    if args.exp_type is None:
-        experiment_type_str = ""
-    else:
-        experiment_type_str = "%s_" % args.exp_type
+    try:
+        # Experiment type
+        if args.exp_type is None:
+            experiment_type_str = ""
+        else:
+            experiment_type_str = "%s_" % args.exp_type
+    except:
+        experiment_type_str = "%s_" % str(args.exp_type)
 
     # experiment index
     num_str = str(args.exp)
 
     # learning rate
-    lrate_str = "LR_%0.6f_" % args.lrate
+    lrate_str = f"LR_{str(args.lrate)[:4]}_"
 
     return "%s/%s_%s_filt_%s_ker_%s_hidden_%s_l1_%s_l2_%s_drop_%s_frac_%s_lrate_%s_%s" % (
         args.results_path,
@@ -89,13 +86,6 @@ def execute_exp(args, model, train_dset, val_dset, network_fn, network_params, t
     fbase = generate_fname(args)
 
     print(fbase)
-
-    if vars(args).get('util', False):
-        print('returning datasets')
-        return train_dset, val_dset, callbacks
-    if args.hyperband:
-        print('returning model')
-        return model
 
     print(model.summary())
     tf.keras.utils.plot_model(model, show_shapes=True, show_layer_names=True, expand_nested=True,
@@ -162,7 +152,7 @@ def start_training(args, model, train_dset, val_dset, network_fn, network_params
 
     evaluate_on = dict() if evaluate_on is None else evaluate_on
 
-    def bleed_out(index, lrate, minimum=1e-3):
+    def bleed_out(index, lrate=1e-3, minimum=1e-3):
         # Oscillating learning rate schedule
         # inspired by https://arxiv.org/abs/1506.01186
         from math import sin, pi
@@ -189,6 +179,10 @@ def start_training(args, model, train_dset, val_dset, network_fn, network_params
                                                   min_delta=args.min_delta,
                                                   monitor='val_categorical_accuracy'),
                  tf.keras.callbacks.LearningRateScheduler(bleed_out)]
+
+    if vars(args).get('util', False):
+        print('returning datasets')
+        return train_dset, val_dset, callbacks
 
     return execute_exp(args, model, train_dset, val_dset, network_fn, network_params,
                        0, train_steps, val_steps, callbacks=callbacks, evaluate_on=evaluate_on)
@@ -412,7 +406,7 @@ def DOT_CV(args, da_fn, da_args, network_fn, network_params):
             train_fraction=args.train_fraction)
 
     val_dset = to_dataset(val_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
-                          class_mode='categorical', center=True, cache=args.cache)
+                          class_mode='categorical', center=True, cache=args.cache, repeat=False)
     train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
                             class_mode='categorical', center=True, cache=args.cache)
 

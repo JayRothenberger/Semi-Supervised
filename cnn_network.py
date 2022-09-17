@@ -157,6 +157,14 @@ def build_transformer_4(conv_filters,
                         dropout=0,
                         loss='sparse_categorical_crossentropy',
                         pad=2, overlap=4, **kwargs):
+
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        attention_heads = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),
@@ -283,6 +291,14 @@ def build_transformer_3(conv_filters,
                         dropout=0,
                         loss='sparse_categorical_crossentropy',
                         pad=2, overlap=4, **kwargs):
+
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        attention_heads = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),
@@ -423,6 +439,14 @@ def build_transformer_2(conv_filters,
                         dropout=0,
                         loss='sparse_categorical_crossentropy',
                         pad=2, overlap=4, **kwargs):
+
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        attention_heads = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),
@@ -539,6 +563,14 @@ def build_transformer_1(conv_filters,
                         l2=None,
                         dropout=0,
                         loss='sparse_categorical_crossentropy', **kwargs):
+
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        attention_heads = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),
@@ -658,6 +690,14 @@ def build_transformer_0(conv_filters,
                         l2=None,
                         dropout=0,
                         loss='sparse_categorical_crossentropy', **kwargs):
+
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        attention_heads = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),
@@ -762,6 +802,14 @@ def build_axial_transformer(conv_filters,
                             l2=None,
                             dropout=0,
                             loss='sparse_categorical_crossentropy', **kwargs):
+
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        attention_heads = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
     conv_params = {
         'use_bias': True,
         'kernel_initializer': tf.keras.initializers.LecunNormal(),

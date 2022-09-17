@@ -7,7 +7,9 @@ import argparse
 from tensorflow import keras
 import keras_tuner as kt
 from copy import deepcopy as copy
-
+import time
+import datetime
+TIMESTRING = datetime.datetime.fromtimestamp(time.time()).isoformat(sep='T', timespec='auto')
 # code supplied locally
 from job_control import JobIterator
 from cnn_network import *
@@ -27,6 +29,7 @@ def create_parser():
     parser.add_argument('--nogo', action='store_true', help='Do not perform the experiment')
     parser.add_argument('--peek', action='store_true', help='Display images from dataset instead of training')
     parser.add_argument('--verbose', '-v', action='count', default=0, help="Verbosity level")
+    parser.add_argument('--scratch', type=str, default=None, help="Local scratch partition")
 
     # CPU/GPU
     parser.add_argument('--gpu', action='store_true', help='Use a GPU')
@@ -193,7 +196,7 @@ def exp_type_to_hyperparameters(args):
             'hidden': [[10, 10, 10]],
             'l1': [None],
             'l2': [None],
-            'dropout': [0.1*i for i in range(10)],
+            'dropout': [0.1],
             'train_iterations': [20],
             'train_fraction': [1],
             'epochs': [512],
@@ -201,23 +204,24 @@ def exp_type_to_hyperparameters(args):
             'convex_prob': [.5],
             'steps_per_epoch': [1024],
             'patience': [32],
-            'batch': [64],
+            'batch': [32],
             'lrate': [3e-3],
             'randAugment': [True],
             'peek': [False],
-            'convexAugment': [None, 'blended', 'mixup'],
+            'convexAugment': ['fff', 'blended', 'mixup'],
             'cross_validate': [False],
-            'rand_M': [.3],
+            'rand_M': [.01],
             'rand_N': [1],
-            'search_space': {'dropout': True}
+            'search_space': {'dropout': True},
+            'min_delta': [.005]
         },
         'da': {
-            'filters': [[12, 24, 48, 64, 64]],
-            'kernels': [[3, 5, 3, 2, 1]],
-            'hidden': [[12, 12, 12, 12]],
+            'filters': ['[12, 24, 48, 64, 64]'],
+            'kernels': ['[3, 5, 3, 2, 1]'],
+            'hidden': ['[12, 12, 12, 12]'],
             'l1': [None],
             'l2': [None],
-            'dropout': [0.1, .2],
+            'dropout': [0.1],
             'train_iterations': [20],
             'train_fraction': [1],
             'epochs': [512],
@@ -226,13 +230,20 @@ def exp_type_to_hyperparameters(args):
             'steps_per_epoch': [512],
             'patience': [32],
             'batch': [64],
-            'lrate': [3e-3],
+            'lrate': [1e-3],
             'randAugment': [False],
             'peek': [False],
-            'convexAugment': [None, 'blended', 'mixup'],
+            'convexAugment': ['fff'],
             'cross_validate': [False],
-            'rand_M': [.1],
-            'rand_N': [2],
+            'rand_M': [.3],
+            'rand_N': [1],
+            'search_space': {
+                'dropout': True,
+                'l1': True,
+                'l2': True,
+                'hidden': False,
+            },
+            'min_delta': [.005]
         },
     }
 
@@ -264,7 +275,7 @@ def augment_args(args):
         return ""
     # Create the iterator
     ji = JobIterator({key: p[key] for key in set(p) - set(p['search_space']) - {'search_space'}}) \
-        if args.hyperband else JobIterator(p)
+        if args.hyperband else JobIterator({key: p[key] for key in set(p) - {'search_space'}})
 
     print("Total jobs:", ji.get_njobs())
 
@@ -392,27 +403,23 @@ def generate_fname(args):
     :return: a string (file name prefix)
     """
     # network parameters
-    hidden_str = '_'.join([str(i) for i in args.hidden])
-    filters_str = '_'.join([str(i) for i in args.filters])
-    kernels_str = '_'.join([str(i) for i in args.kernels])
-
-    # Label
-    if args.label is None:
-        label_str = ""
-    else:
-        label_str = "%s_" % args.label
-
-    # Experiment type
-    if args.exp_type is None:
-        experiment_type_str = ""
-    else:
-        experiment_type_str = "%s_" % args.exp_type
+    hidden_str = '_'.join([str(i) for i in args.hidden]) if not isinstance(args.hidden, str) else args.hidden
+    filters_str = '_'.join([str(i) for i in args.filters]) if not isinstance(args.filters, str) else args.filters
+    kernels_str = '_'.join([str(i) for i in args.kernels]) if not isinstance(args.kernels, str) else args.kernels
+    try:
+        # Experiment type
+        if args.exp_type is None:
+            experiment_type_str = ""
+        else:
+            experiment_type_str = "%s_" % args.exp_type
+    except:
+        experiment_type_str = "%s_" % str(args.exp_type)
 
     # experiment index
     num_str = str(args.exp)
 
     # learning rate
-    lrate_str = "LR_%0.6f_" % args.lrate
+    lrate_str = f"LR_{str(args.lrate)[:4]}_"
 
     return "%s/%s_%s_filt_%s_ker_%s_hidden_%s_l1_%s_l2_%s_drop_%s_frac_%s_lrate_%s_%s" % (
         args.results_path,
@@ -458,7 +465,7 @@ def network_switch(args, key, default):
                  'loss': 'categorical_crossentropy',
                  'pad': 24,
                  'overlap': 8},
-            'network_fn': build_kEfficientNetB0},
+            'network_fn': build_transformer_4},
 
         'cifar10': {
             'params': {'learning_rate': args.lrate,
@@ -474,7 +481,7 @@ def network_switch(args, key, default):
                        'pad': 1,
                        'overlap': 4,
                        'skip_stride_cnt': 3},
-            'network_fn': build_transformer_4},
+            'network_fn': build_kEfficientNetB0},
 
         'cifar100': {
             'params': {'learning_rate': args.lrate,
@@ -528,13 +535,14 @@ if __name__ == '__main__':
         'control': DOT_CV
     }
 
-    from data_generator import blended_dset, mixup_dset, bc_plus, generalized_bc_plus, to_dataset
+    from data_generator import blended_dset, mixup_dset, bc_plus, generalized_bc_plus, to_dataset, fast_fourier_fuckup
 
     da_switch = {
         'blended': blended_dset,
         'mixup': mixup_dset,
         'bc+': bc_plus,
         'bc++': generalized_bc_plus,
+        'fff': fast_fourier_fuckup
     }
 
     da_args = {
@@ -543,7 +551,9 @@ if __name__ == '__main__':
         'prob': args.convex_prob,
         'std': .05,
         'alpha': args.convex_prob,
-        'cache': args.cache
+        'cache': args.cache,
+        'M': args.rand_M,
+        'N': args.rand_N
     }
 
     def default(dset, **kwargs):
@@ -568,9 +578,9 @@ if __name__ == '__main__':
             def hyperband_fn(hp):
 
                 special_args = copy(args)
-                for key in args.search_space:
+                for key in special_args.search_space:
                     vars(special_args)[key] = hp.Choice(name=key, values=vars(special_args)[key],
-                                                        ordered=args.search_space[key])
+                                                        ordered=special_args.search_space[key])
 
                 print(special_args.dropout)
 
@@ -578,17 +588,26 @@ if __name__ == '__main__':
 
                 network_fn, network_params = network['network_fn'], network['params']
 
-                return exp_fn(special_args, da_fn, da_args, network_fn, network_params)
+                if args.distributed:
+                    # create the scope
+                    strategy = tf.distribute.MirroredStrategy()
+                    with strategy.scope():
+                        # build the model (in the scope)
+                        model = network_fn(**network_params)
+                else:
+                    model = network_fn(**network_params)
+
+                return model
 
             return hyperband_fn
 
 
         hypermodel = hyperband_wrapper(args, da_args)
-
+        print(args.search_space)
         tuner = kt.Hyperband(hypermodel=hypermodel,
                              objective=kt.Objective("val_categorical_accuracy", direction="max"),
-                             max_epochs=10,
-                             project_name='hyperband_tuner')
+                             max_epochs=100,
+                             project_name=f'./../hyperband_tuner/{TIMESTRING}')
 
         tuner.search(train_dset,
                      steps_per_epoch=args.steps_per_epoch,

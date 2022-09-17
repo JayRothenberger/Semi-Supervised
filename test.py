@@ -5,7 +5,7 @@ import os
 import numpy as np
 import tensorflow as tf
 
-from data_generator import get_dataframes_self_train, to_dataset, mixup_dset
+from data_generator import get_dataframes_self_train, to_dataset, mixup_dset, fast_fourier_fuckup
 
 
 def varying_args(evaluator):
@@ -117,12 +117,11 @@ if __name__ == "__main__":
             print('NO GPU')
     prep_gpu(True)
 
-    """
     dset = to_dataset(val_df, center=True)
-    dset = mixup_dset(dset)
+    dset = fast_fourier_fuckup(dset, alpha=.4)
     explore_image_dataset(dset, 10)
     exit()
-    """
+
 
     evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/cifar10/', fbase='')
     from data_generator import cifar10_dset
