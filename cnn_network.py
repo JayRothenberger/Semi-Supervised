@@ -15,6 +15,7 @@ import cai.layers
 import cai.datasets
 import cai.efficientnet
 import cai.mobilenet_v3
+import cai.densenet
 import cai.util
 
 
@@ -69,7 +70,6 @@ def build_MobileNetV3Small(**kwargs):
 
 def build_keras_kapplication(application, image_size=(256, 256, 3), learning_rate=1e-4, loss='categorical_crossentropy',
                              n_classes=10, dropout=0, channels=16, skip_stride_cnt=0, **kwargs):
-
     """
     in order to get this to work I have made several changes to my training procedure
 
@@ -137,6 +137,22 @@ def build_kMobileNetV3(**kwargs):
     return build_keras_kapplication(cai.mobilenet_v3.kMobileNetV3Large, channels=32, **kwargs)
 
 
+def build_kDensenetBCL40(learning_rate=1e-4, loss='categorical_crossentropy', **kwargs):
+    model = cai.densenet.simple_densenet([32, 32, 3], blocks=6, growth_rate=12, bottleneck=48, compression=0.5,
+                                        l2_decay=0.0001 / 1024)
+
+    opt = tf.keras.optimizers.RMSprop(learning_rate)
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
 def build_kMobileNet(**kwargs):
     return build_keras_kapplication(cai.mobilenet.kMobileNet, channels=32, **kwargs)
 
@@ -157,7 +173,6 @@ def build_transformer_4(conv_filters,
                         dropout=0,
                         loss='sparse_categorical_crossentropy',
                         pad=2, overlap=4, **kwargs):
-
     if isinstance(conv_filters, str):
         conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
     if isinstance(conv_size, str):
@@ -291,7 +306,6 @@ def build_transformer_3(conv_filters,
                         dropout=0,
                         loss='sparse_categorical_crossentropy',
                         pad=2, overlap=4, **kwargs):
-
     if isinstance(conv_filters, str):
         conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
     if isinstance(conv_size, str):
@@ -439,7 +453,6 @@ def build_transformer_2(conv_filters,
                         dropout=0,
                         loss='sparse_categorical_crossentropy',
                         pad=2, overlap=4, **kwargs):
-
     if isinstance(conv_filters, str):
         conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
     if isinstance(conv_size, str):
@@ -563,7 +576,6 @@ def build_transformer_1(conv_filters,
                         l2=None,
                         dropout=0,
                         loss='sparse_categorical_crossentropy', **kwargs):
-
     if isinstance(conv_filters, str):
         conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
     if isinstance(conv_size, str):
@@ -690,7 +702,6 @@ def build_transformer_0(conv_filters,
                         l2=None,
                         dropout=0,
                         loss='sparse_categorical_crossentropy', **kwargs):
-
     if isinstance(conv_filters, str):
         conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
     if isinstance(conv_size, str):
@@ -802,7 +813,6 @@ def build_axial_transformer(conv_filters,
                             l2=None,
                             dropout=0,
                             loss='sparse_categorical_crossentropy', **kwargs):
-
     if isinstance(conv_filters, str):
         conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
     if isinstance(conv_size, str):

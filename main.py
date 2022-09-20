@@ -140,6 +140,7 @@ def exp_type_to_hyperparameters(args):
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
+            'network_fn': [build_transformer_4]
         },
         'self_train': {
             'filters': [[36, 64]],
@@ -165,6 +166,7 @@ def exp_type_to_hyperparameters(args):
             'rand_M': [.1],
             'rand_N': [2],
             'sample': [1.0],
+            'network_fn': [build_transformer_4]
         },
         'cifar100': {
             'filters': [[36, 64]],
@@ -188,12 +190,12 @@ def exp_type_to_hyperparameters(args):
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
-            'cfar': [True]
+            'network_fn': [build_kDensenetBCL40, build_kMobileNetV3, build_kEfficientNetB0]
         },
         'cifar10': {
-            'filters': [[12, 24, 48]],
-            'kernels': [[3, 3, 1]],
-            'hidden': [[10, 10, 10]],
+            'filters': ['[12, 24, 48]'],
+            'kernels': ['[3, 3, 1]'],
+            'hidden': ['[10, 10, 10]'],
             'l1': [None],
             'l2': [None],
             'dropout': [0.1],
@@ -204,16 +206,17 @@ def exp_type_to_hyperparameters(args):
             'convex_prob': [.5],
             'steps_per_epoch': [1024],
             'patience': [32],
-            'batch': [32],
+            'batch': [64],
             'lrate': [3e-3],
-            'randAugment': [True],
+            'randAugment': [True, False],
             'peek': [False],
-            'convexAugment': ['fff', 'blended', 'mixup'],
+            'convexAugment': ['fff', 'mixup', None],
             'cross_validate': [False],
-            'rand_M': [.01],
+            'rand_M': [.1],
             'rand_N': [1],
             'search_space': {'dropout': True},
-            'min_delta': [.005]
+            'min_delta': [.001],
+            'network_fn': [build_kDensenetBCL40, build_kMobileNetV3, build_kEfficientNetB0]
         },
         'da': {
             'filters': ['[12, 24, 48, 64, 64]'],
@@ -243,7 +246,8 @@ def exp_type_to_hyperparameters(args):
                 'l2': True,
                 'hidden': False,
             },
-            'min_delta': [.005]
+            'min_delta': [.005],
+            'network_fn': [build_transformer_4]
         },
     }
 
@@ -449,7 +453,7 @@ def network_switch(args, key, default):
                        'l2': args.l2,
                        'dropout': args.dropout,
                        'loss': 'categorical_crossentropy'},
-            'network_fn': build_transformer_4},
+            'network_fn': args.network_fn},
 
         'da': {
             'params':
@@ -465,7 +469,7 @@ def network_switch(args, key, default):
                  'loss': 'categorical_crossentropy',
                  'pad': 24,
                  'overlap': 8},
-            'network_fn': build_transformer_4},
+            'network_fn': args.network_fn},
 
         'cifar10': {
             'params': {'learning_rate': args.lrate,
@@ -481,7 +485,7 @@ def network_switch(args, key, default):
                        'pad': 1,
                        'overlap': 4,
                        'skip_stride_cnt': 3},
-            'network_fn': build_kEfficientNetB0},
+            'network_fn': args.network_fn},
 
         'cifar100': {
             'params': {'learning_rate': args.lrate,
@@ -497,7 +501,7 @@ def network_switch(args, key, default):
                        'pad': 4,
                        'overlap': 4,
                        'skip_stride_cnt': 3},
-            'network_fn': build_kMobileNetV3},
+            'network_fn': args.network_fn},
 
         'control': {
             'params':
@@ -513,7 +517,7 @@ def network_switch(args, key, default):
                  'loss': 'categorical_crossentropy',
                  'pad': 24,
                  'overlap': 8},
-            'network_fn': build_transformer_4},
+            'network_fn': args.network_fn},
     }
 
     return switch.get(key, default)

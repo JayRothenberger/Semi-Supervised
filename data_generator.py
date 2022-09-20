@@ -831,7 +831,7 @@ def get_spectrum(freqs, decay_power, ch, h, w=0, z=0):
     """
     scale = np.ones(1) / (np.maximum(freqs, np.array([1. / max(w, h, z)])) ** decay_power)
 
-    param_size = (ch, *freqs.shape,  2)
+    param_size = (ch, *freqs.shape, 2)
     param = tf.random.normal(tuple(param_size), dtype=tf.double)
 
     scale = tf.expand_dims(scale, -1)[None, :]
