@@ -839,15 +839,67 @@ def get_spectrum(freqs, decay_power, ch, h, w=0, z=0):
     return scale * tf.cast(param, tf.double)
 
 
-def fuzzy_fmix(x, y, alpha=1.0, delta=3):
-
+def fout(x, y, alpha=.3, delta=3):
     shape = (x.shape[-3], x.shape[-2])
 
     freqs = fftfreqnd(*shape)
     spectrum = get_spectrum(freqs, delta, x.shape[-1], *shape)
     spectrum = tf.dtypes.complex(spectrum[:, 0], spectrum[:, 1])
     mask = np.real(np.fft.irfftn(spectrum, shape))
+    mask = mask[:1, :shape[0], :shape[1]]
+    flat_mask = tf.reshape(mask, (shape[0] * shape[1],))
+    top_k, _ = tf.math.top_k(flat_mask, k=int(alpha * shape[0] * shape[1]))
+    kth = tf.reduce_min(top_k)
 
+    mask = tf.reshape(tf.where(mask <= kth, tf.ones_like(mask), tf.zeros_like(mask)), (1, shape[0], shape[1]))
+
+    mask = np.moveaxis(mask, 0, -1)
+    mask = tf.stack([mask for i in range(x.shape[0])])
+
+    x = tf.multiply(mask, tf.cast(x, tf.double))
+
+    x, y = tf.cast(x, tf.float32), tf.cast(y, tf.float32)
+
+    return x, y
+
+
+def fmix(x, y, alpha=.3, delta=3):
+    shape = (x.shape[-3], x.shape[-2])
+
+    freqs = fftfreqnd(*shape)
+    spectrum = get_spectrum(freqs, delta, x.shape[-1], *shape)
+    spectrum = tf.dtypes.complex(spectrum[:, 0], spectrum[:, 1])
+    mask = np.real(np.fft.irfftn(spectrum, shape))
+    mask = mask[:1, :shape[0], :shape[1]]
+    flat_mask = tf.reshape(mask, (shape[0] * shape[1],))
+    top_k, _ = tf.math.top_k(flat_mask, k=int(alpha * shape[0] * shape[1]))
+    kth = tf.reduce_min(top_k)
+
+    mask = tf.reshape(tf.where(mask >= kth, tf.ones_like(mask), tf.zeros_like(mask)), (1, shape[0], shape[1]))
+
+    mask = np.moveaxis(mask, 0, -1)
+    mask = tf.stack([mask for i in range(x.shape[1])])
+    mask = tf.stack([mask, 1 - mask])
+
+    weights = np.array([alpha, 1 - alpha])
+
+    x = tf.multiply(mask, tf.cast(x, tf.double))
+
+    x = tf.reduce_sum(x, axis=0)
+    y = tf.tensordot(tf.cast(weights, tf.double), tf.cast(y, tf.double), (0, 0))
+
+    x, y = tf.cast(x, tf.float32), tf.cast(y, tf.float32)
+
+    return x, y
+
+
+def fuzzy_fmix(x, y, alpha=1.0, delta=3):
+    shape = (x.shape[-3], x.shape[-2])
+
+    freqs = fftfreqnd(*shape)
+    spectrum = get_spectrum(freqs, delta, x.shape[-1], *shape)
+    spectrum = tf.dtypes.complex(spectrum[:, 0], spectrum[:, 1])
+    mask = np.real(np.fft.irfftn(spectrum, shape))
     mask = mask[:1, :shape[0], :shape[1]]
 
     mask = (mask - tf.reduce_min(mask))
@@ -862,11 +914,38 @@ def fuzzy_fmix(x, y, alpha=1.0, delta=3):
     x = tf.multiply(mask, tf.cast(x, tf.double))
 
     x = tf.reduce_sum(x, axis=0)
+    # multiply weights along axis=0 and sum along the same axis
     y = tf.tensordot(weights, tf.cast(y, tf.double), (0, 0))
 
     x, y = tf.cast(x, tf.float32), tf.cast(y, tf.float32)
 
     return x, y
+
+
+def foff_dset(train_dset, alpha=0.3, delta=3.0, prefetch=4, **kwargs):
+    dataset = train_dset.map(
+        lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, .01], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE)
+
+    dataset = dataset.map(lambda x, y: tf.py_function(fout, inp=[x, y, tf.cast(alpha, tf.double),
+                                                                 tf.cast(delta, tf.double)],
+                                                      Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE)
+
+    return dataset.prefetch(prefetch)
+
+
+def fmix_dset(train_dset, alpha=0.3, delta=3, prefetch=4, **kwargs):
+    dataset = train_dset.map(
+        lambda x, y: tf.py_function(add_gaussian_noise, inp=[x, y, .01], Tout=(tf.float32, tf.float32)),
+        num_parallel_calls=tf.data.AUTOTUNE).batch(2)
+
+    dataset = dataset.map(lambda x, y: tf.py_function(fmix, inp=[x, y, tf.cast(alpha, tf.double),
+                                                                 tf.cast(delta, tf.double)],
+                                                      Tout=(tf.float32, tf.float32)),
+                          num_parallel_calls=tf.data.AUTOTUNE)
+
+    return dataset.prefetch(prefetch)
 
 
 def fast_fourier_fuckup(train_ds, n_blended=2, prefetch=4, M=.3, N=1, alpha=1.0, **kwargs):

@@ -191,7 +191,6 @@ def explore_image_dataset(dset, num_images, fname=''):
             break
 
     for i, img in enumerate(imgs):
-        print(img.shape)
         img = img[0] + np.max(np.min(img[0]), 0)
         img = img - np.max(np.min(img), 0)
         img = Image.fromarray(np.uint8((img / np.max(img)) * 255))

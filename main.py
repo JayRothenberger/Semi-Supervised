@@ -9,7 +9,8 @@ import keras_tuner as kt
 from copy import deepcopy as copy
 import time
 import datetime
-TIMESTRING = datetime.datetime.fromtimestamp(time.time()).isoformat(sep='T', timespec='auto')
+
+TIMESTRING = datetime.datetime.fromtimestamp(time.time()).isoformat(sep='T', timespec='auto').replace(':', '')
 # code supplied locally
 from job_control import JobIterator
 from cnn_network import *
@@ -190,12 +191,14 @@ def exp_type_to_hyperparameters(args):
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [2],
-            'network_fn': [build_kDensenetBCL40, build_kMobileNetV3, build_kEfficientNetB0]
+            'network_fn': [build_kDensenetBCL40, build_kMobileNetV3, build_kEfficientNetB0],
+            'iterations': 24,
+            'downsample': 4,
         },
         'cifar10': {
-            'filters': ['[12, 24, 48]'],
-            'kernels': ['[3, 3, 1]'],
-            'hidden': ['[10, 10, 10]'],
+            'filters': ['[64]'],
+            'kernels': ['[3]'],
+            'hidden': ['[10]'],
             'l1': [None],
             'l2': [None],
             'dropout': [0.1],
@@ -207,23 +210,34 @@ def exp_type_to_hyperparameters(args):
             'steps_per_epoch': [1024],
             'patience': [32],
             'batch': [64],
-            'lrate': [3e-3],
-            'randAugment': [True, False],
+            'lrate': [1e-3],
+            'randAugment': [True],
             'peek': [False],
-            'convexAugment': ['fff', 'mixup', None],
+            'convexAugment': ['mixup'],  # ],  # 'mixup', 'blended', 'fff', 'fmix'],  #'foff'
             'cross_validate': [False],
             'rand_M': [.1],
             'rand_N': [1],
-            'search_space': {'dropout': True},
+            # 'blocks': [i for i in range(1, 9)],
+            # 'iterations': list(range(12, 40, 2)),
+            # 'activation': ['relu', 'selu', 'elu'],
+            # 'downsample': list(range(1, 5)),
+            # 'search_space': {
+            #    'downsample': True,
+            #    'activation': False,
+            #    'iterations': True,
+            # },
             'min_delta': [.001],
-            'network_fn': [build_kDensenetBCL40, build_kMobileNetV3, build_kEfficientNetB0]
+            'network_fn': [build_hallucinetv4],
+            'iterations': [20],
+            'downsample': [5],
+            # , build_kDensenetBCL40, build_kMobileNetV3, build_kEfficientNetB0, build_thriftynet_sep, build_thriftynet
         },
         'da': {
-            'filters': ['[12, 24, 48, 64, 64]'],
-            'kernels': ['[3, 5, 3, 2, 1]'],
-            'hidden': ['[12, 12, 12, 12]'],
+            'filters': ['[48]'],
+            'kernels': ['[3]'],
+            'hidden': ['[10]'],
             'l1': [None],
-            'l2': [None],
+            'l2': [None, 1e-5],
             'dropout': [0.1],
             'train_iterations': [20],
             'train_fraction': [1],
@@ -231,23 +245,25 @@ def exp_type_to_hyperparameters(args):
             'convex_dim': [2],
             'convex_prob': [.5],
             'steps_per_epoch': [512],
-            'patience': [32],
-            'batch': [64],
+            'patience': [10],
+            'batch': [6],
             'lrate': [1e-3],
-            'randAugment': [False],
+            'randAugment': [True],
             'peek': [False],
-            'convexAugment': ['fff'],
+            'convexAugment': [None],
             'cross_validate': [False],
             'rand_M': [.3],
             'rand_N': [1],
-            'search_space': {
-                'dropout': True,
-                'l1': True,
-                'l2': True,
-                'hidden': False,
-            },
-            'min_delta': [.005],
-            'network_fn': [build_transformer_4]
+            # 'search_space': {
+            #    'dropout': True,
+            #    'l1': True,
+            #    'l2': True,
+            #    'hidden': False,
+            # },
+            'min_delta': [.001],
+            'network_fn': [build_kDensenetBCL40],
+            'iterations': [21],
+            'downsample': [7],
         },
     }
 
@@ -302,23 +318,23 @@ def prep_gpu(index, gpu=False, style='a100'):
     """prepare the GPU for tensorflow computation"""
     # tell tensorflow to be quiet
     # os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-    # use the available cpus to set the parallelism level
-    if args.cpus_per_task is not None:
-        tf.config.threading.set_inter_op_parallelism_threads(args.cpus_per_task)
-        tf.config.threading.set_intra_op_parallelism_threads(args.cpus_per_task)
-
-    # GPU check
-    physical_devices = tf.config.list_physical_devices('GPU')
     # Turn off GPU?
     if not gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
     elif style == 'a100':
+        # GPU check
+        physical_devices = tf.config.list_physical_devices('GPU')
         tf.config.set_visible_devices(physical_devices[index % len(tf.config.list_physical_devices('GPU'))], 'GPU')
     else:
         pass  # do nothing (v100, distributed)
     physical_devices = tf.config.get_visible_devices('GPU')
     n_physical_devices = len(physical_devices)
     print(physical_devices)
+
+    # use the available cpus to set the parallelism level
+    if args.cpus_per_task is not None:
+        tf.config.threading.set_inter_op_parallelism_threads(args.cpus_per_task)
+        tf.config.threading.set_intra_op_parallelism_threads(args.cpus_per_task)
 
     if n_physical_devices > 1:
         for physical_device in physical_devices:
@@ -467,6 +483,8 @@ def network_switch(args, key, default):
                  'l2': args.l2,
                  'dropout': args.dropout,
                  'loss': 'categorical_crossentropy',
+                 'iterations': args.iterations,
+                 'downsample': args.downsample,
                  'pad': 24,
                  'overlap': 8},
             'network_fn': args.network_fn},
@@ -484,6 +502,8 @@ def network_switch(args, key, default):
                        'loss': 'categorical_crossentropy',
                        'pad': 1,
                        'overlap': 4,
+                       'iterations': args.iterations,
+                       'downsample': args.downsample,
                        'skip_stride_cnt': 3},
             'network_fn': args.network_fn},
 
@@ -498,6 +518,8 @@ def network_switch(args, key, default):
                        'l2': args.l2,
                        'dropout': args.dropout,
                        'loss': 'categorical_crossentropy',
+                       'iterations': args.iterations,
+                       'downsample': args.downsample,
                        'pad': 4,
                        'overlap': 4,
                        'skip_stride_cnt': 3},
@@ -539,14 +561,17 @@ if __name__ == '__main__':
         'control': DOT_CV
     }
 
-    from data_generator import blended_dset, mixup_dset, bc_plus, generalized_bc_plus, to_dataset, fast_fourier_fuckup
+    from data_generator import blended_dset, mixup_dset, bc_plus, generalized_bc_plus, fast_fourier_fuckup, fmix_dset, \
+        foff_dset
 
     da_switch = {
         'blended': blended_dset,
         'mixup': mixup_dset,
         'bc+': bc_plus,
         'bc++': generalized_bc_plus,
-        'fff': fast_fourier_fuckup
+        'fff': fast_fourier_fuckup,
+        'fmix': fmix_dset,
+        'foff': foff_dset
     }
 
     da_args = {
@@ -560,8 +585,10 @@ if __name__ == '__main__':
         'N': args.rand_N
     }
 
+
     def default(dset, **kwargs):
         return dset
+
 
     # takes: train_ds, n_blended, prefetch, prob, std, alpha
     da_fn = da_switch.get(args.convexAugment, default)
@@ -576,6 +603,7 @@ if __name__ == '__main__':
         vars(args)['util'] = True
         train_dset, val_dset, callbacks = get_dsets(exp_fn, args, da_fn, da_args)
         vars(args)['util'] = False
+
 
         def hyperband_wrapper(args, da_args):
             # convert network params and search space to an acceptable function format
