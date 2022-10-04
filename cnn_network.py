@@ -112,6 +112,32 @@ def build_keras_application(application, image_size=(256, 256, 3), learning_rate
     return model
 
 
+def build_special_VGG(image_size, classes=(3, 4, 5), learning_rate=1e-3, loss='categorical_crossentropy'):
+    inputs = Input(image_size)
+    # load VGG16 with imagenet weights
+    model = VGG16(input_tensor=inputs, include_top=False, weights='imagenet', pooling='avg',
+                  include_preprocessing=False)
+
+    outputs = []
+    for n_classes in classes:
+        outputs.append(Dense(n_classes, activation='softmax')(Flatten()(model.output)))
+    # 'outputs' can take a list of output tensors
+    model = tf.keras.models.Model(inputs=[inputs], outputs=outputs)
+    # you can ignore these next two statements
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+    # select the correct kind of accuracy
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+    # compile the model
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+    # return the compiled model
+    return model
+
+
 def build_EfficientNetB0(**kwargs):
     return build_keras_application(EfficientNetB0, **kwargs)
 
@@ -194,9 +220,9 @@ def build_kMobileNetV3(**kwargs):
 
 
 def build_kDensenetBCL40(learning_rate=1e-4, loss='categorical_crossentropy', blocks=6, growth_rate=12, bottleneck=48,
-                         compression=0.5, l2_decay=0.0001 / 1024, image_size=(32, 32, 3), **kwargs):
+                         compression=0.5, l2_decay=0.0001 / 1024, image_size=(32, 32, 3), n_classes=10, **kwargs):
     model = cai.densenet.simple_densenet(image_size, blocks=blocks, growth_rate=growth_rate, bottleneck=bottleneck,
-                                         compression=compression, l2_decay=l2_decay)
+                                         compression=compression, l2_decay=l2_decay, num_classes=n_classes)
 
     opt = tf.keras.optimizers.RMSprop(learning_rate)
     opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
@@ -252,7 +278,7 @@ def build_hallucinetv4(conv_filters,
     x = Lambda(lambda z: tf.pad(z, ((0, 0), (0, 0), (0, 0), (0, conv_filters[0] - z.shape[-1]))))(x)
     add_to_end = []
     for block in range(len(conv_filters)):
-        thrifty_exp = Conv2D(filters=conv_filters[block] * 4, kernel_size=1, activation=None, **conv_params)
+        thrifty_exp = Conv2D(filters=conv_filters[block] * 2, kernel_size=1, activation=None, **conv_params)
 
         thrifty_convs = [DepthwiseConv2D(kernel_size=3,
                                          activation=activation, **conv_params),
@@ -269,6 +295,7 @@ def build_hallucinetv4(conv_filters,
             z = sqz(z)
             z = BatchNormalization()(z)
             return z
+
         prev_layers = [x]
         for i in range(iterations):
             x = thrifty_imb(x, thrifty_exp, thrifty_convs, thrifty_squeeze)
@@ -301,6 +328,95 @@ def build_hallucinetv4(conv_filters,
     x = Flatten()(x)
 
     outputs = Dense(n_classes, activation='softmax')(x)
+
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'thrifty_model_{"%02d" % time()}')
+
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_hallucinet_upcycle(conv_filters,
+                             conv_size,
+                             attention_heads,
+                             learning_rate,
+                             image_size,
+                             iterations=24,
+                             loss='categorical_crossentropy',
+                             pooling='max',
+                             l1=None, l2=None,
+                             activation=lambda x: x * tf.nn.relu6(x + 3) / 6,
+                             n_classes=10,
+                             downsample=3,
+                             dropout=0.1,
+                             depth=2,
+                             skips=4,
+                             **kwargs):
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        dense_layers = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
+    inputs = Input(image_size)
+
+    conv_params = {
+        'use_bias': False,
+        'kernel_initializer': tf.keras.initializers.GlorotUniform(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'padding': 'same'
+    }
+
+    x = inputs
+
+    x = Lambda(lambda z: tf.pad(z, ((0, 0), (0, 0), (0, 0), (0, conv_filters[0] - z.shape[-1]))))(x)
+
+    for block in range(len(conv_filters)):
+        thrifty_exp = Conv2D(filters=conv_filters[block] * 2, kernel_size=1, activation=None, **conv_params)
+
+        thrifty_convs = [DepthwiseConv2D(kernel_size=3,
+                                         activation=activation, **conv_params),
+                         DepthwiseConv2D(kernel_size=5,
+                                         activation=activation, **conv_params),
+                         MaxPooling2D(3, 1, padding='same')]
+
+        thrifty_squeeze = Conv2D(filters=conv_filters[block], kernel_size=1, activation=activation, **conv_params)
+
+        def thrifty_imb(z, exp, exc, sqz):
+            inp = z
+            z = exp(z)
+            z = Concatenate()([e(z) for e in exc] + [inp])
+            z = sqz(z)
+            z = BatchNormalization()(z)
+            return z
+
+        prev_layers = [x]
+        for i in range(iterations):
+            x = thrifty_imb(x, thrifty_exp, thrifty_convs, thrifty_squeeze)
+            prev_layers.append(x)
+            x = Add()(prev_layers[-skips:])
+            x = BatchNormalization()(x)
+    # semantic segmentation output with extra (irrelevant) channel
+    x = Dense(n_classes + 1, activation='softmax')(x)
+    # reduce sum over width / height
+    x = Lambda(lambda z: tf.reduce_sum(z[:, :, :, :-1], axis=(1, 2)))(x)
+    # want to re-normalize without destroying the gradient
+    # ideally would just divide by sum
+    outputs = Lambda(lambda z: tf.linalg.normalize(z, 1, axis=-1)[0])(x)
 
     accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
 
@@ -359,7 +475,7 @@ def build_hallucinetv3(conv_filters,
     x = Lambda(lambda z: tf.pad(z, ((0, 0), (0, 0), (0, 0), (0, conv_filters[0] - z.shape[-1]))))(x)
     add_to_end = []
     for block in range(len(conv_filters)):
-        thrifty_exp = Conv2D(filters=conv_filters[block] * 4, kernel_size=1, activation=None, **conv_params)
+        thrifty_exp = Conv2D(filters=conv_filters[block] * 2, kernel_size=1, activation=None, **conv_params)
 
         thrifty_convs = [DepthwiseConv2D(kernel_size=3,
                                          activation=activation, **conv_params),
@@ -376,6 +492,7 @@ def build_hallucinetv3(conv_filters,
             z = sqz(z)
             z = BatchNormalization()(z)
             return z
+
         prev_layers = [x]
         for i in range(iterations):
             x = thrifty_imb(x, thrifty_exp, thrifty_convs, thrifty_squeeze)
@@ -1007,7 +1124,8 @@ def build_thriftynet(conv_filters,
 
             if (i % math.ceil(iterations / downsample)) == 0:
                 x = MaxPooling2D((2, 2))(x)
-                prev_layers = [MaxPooling2D((2, 2))(squeeze(Dense(1, activation=None)(Concatenate(axis=-1)([expand_dims(l) for l in prev_layers[-skips:]]))))]
+                prev_layers = [MaxPooling2D((2, 2))(squeeze(
+                    Dense(1, activation=None)(Concatenate(axis=-1)([expand_dims(l) for l in prev_layers[-skips:]]))))]
 
     if pooling == 'avg':
         x = GlobalAveragePooling2D()(x)

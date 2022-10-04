@@ -202,7 +202,7 @@ def self_train(args, network_fn, network_params, train_df, val_df, unlabeled_df,
     :param image_size: (W, H)
     :param dataset_fn: function used to construct the tf.data.Dataset the model will train on
     :param evaluate_on: dictionary of items to pass to model.evaluate in the evaluation steps
-
+c
     """
     print('args', args)
     import distances
