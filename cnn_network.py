@@ -8,7 +8,8 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import Flatten, Conv2D, MaxPooling2D, Dense, Input, Concatenate, Dropout, SpatialDropout2D, \
     MultiHeadAttention, Add, BatchNormalization, LayerNormalization, Conv1D, Reshape, Cropping2D, ZeroPadding3D, \
-    GlobalMaxPooling2D, GlobalAveragePooling2D, Lambda, Average, SeparableConv2D, DepthwiseConv2D
+    GlobalMaxPooling2D, GlobalAveragePooling2D, Lambda, Average, SeparableConv2D, DepthwiseConv2D, UpSampling2D, \
+    Conv2DTranspose
 from time import time
 import math
 from inception import *
@@ -347,6 +348,538 @@ def build_hallucinetv4(conv_filters,
     return model
 
 
+def build_ucinet_upcycle_plus(conv_filters,
+                              conv_size,
+                              attention_heads,
+                              learning_rate,
+                              image_size,
+                              iterations=24,
+                              loss='categorical_crossentropy',
+                              pooling='max',
+                              l1=None, l2=None,
+                              activation=lambda x: x * tf.nn.relu6(x + 3) / 6,
+                              n_classes=10,
+                              downsample=3,
+                              dropout=0.1,
+                              depth=2,
+                              skips=4,
+                              **kwargs):
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        dense_layers = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
+    inputs = Input(image_size)
+
+    x = Lambda(lambda z: tf.pad(z, ((0, 0), (0, 0), (0, 0), (0, conv_filters[0] - z.shape[-1]))))(inputs)
+
+    conv_params = {
+        'use_bias': False,
+        'kernel_initializer': tf.keras.initializers.GlorotUniform(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'padding': 'same'
+    }
+    exc = [DepthwiseConv2D(kernel_size=3,
+                           activation=activation, **conv_params),
+           DepthwiseConv2D(kernel_size=5,
+                           activation=activation, **conv_params),
+           MaxPooling2D(3, 1, padding='same')]
+
+    exp = Conv2D(filters=conv_filters[0] * 2, kernel_size=1, activation=None, **conv_params)
+    sqz = Conv2D(filters=conv_filters[0], kernel_size=1, activation=activation, **conv_params)
+
+    def thrifty_imb(z):
+        inp = z
+        z = exp(z)
+        z = Concatenate()([e(z) for e in exc] + [inp])
+        z = sqz(z)
+        z = BatchNormalization()(z)
+        return z
+
+    skips = [x]
+    for i in range(3):
+        x = thrifty_imb(x)
+        skips.append(x)
+        x = MaxPooling2D(2)(x)
+
+    x = thrifty_imb(x)
+
+    for i in range(3):
+        x = UpSampling2D(interpolation="bilinear")(x)
+        x = Concatenate()([x, skips.pop(-1)])
+        x = Conv2D(filters=conv_filters[0], kernel_size=1, activation=activation, **conv_params)(x)
+        x = thrifty_imb(x)
+
+    # semantic segmentation output with extra (irrelevant) channel
+    x = Dense(n_classes + 1, activation='softmax')(x)
+    # reduce sum over width / height
+    x = Lambda(lambda z: tf.reduce_sum(z[:, :, :, :-1], axis=(1, 2)))(x)
+    # want to re-normalize without destroying the gradient
+    # ideally would just divide by sum
+    outputs = Lambda(lambda z: tf.linalg.normalize(z, 1, axis=-1)[0])(x)
+
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'thrifty_model_{"%02d" % time()}')
+
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_ucinet_upcycle(conv_filters,
+                         conv_size,
+                         attention_heads,
+                         learning_rate,
+                         image_size,
+                         iterations=24,
+                         loss='categorical_crossentropy',
+                         pooling='max',
+                         l1=None, l2=None,
+                         activation=lambda x: x * tf.nn.relu6(x + 3) / 6,
+                         n_classes=10,
+                         downsample=3,
+                         dropout=0.1,
+                         depth=2,
+                         skips=4,
+                         **kwargs):
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        dense_layers = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
+    inputs = Input(image_size)
+
+    conv_params = {
+        'use_bias': False,
+        'kernel_initializer': tf.keras.initializers.GlorotUniform(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'padding': 'same'
+    }
+
+    x = inputs
+
+    def thrifty_imb(z):
+        exc = [DepthwiseConv2D(kernel_size=3,
+                               activation=activation, **conv_params),
+               DepthwiseConv2D(kernel_size=5,
+                               activation=activation, **conv_params),
+               MaxPooling2D(3, 1, padding='same')]
+        inp = z
+        z = Conv2D(filters=conv_filters[0] * 2, kernel_size=1, activation=None, **conv_params)(z)
+        z = Concatenate()([e(z) for e in exc] + [inp])
+        z = Conv2D(filters=conv_filters[0], kernel_size=1, activation=activation, **conv_params)(z)
+        z = BatchNormalization()(z)
+        return z
+
+    skips = [x]
+    for i in range(3):
+        x = thrifty_imb(x)
+        skips.append(x)
+        x = MaxPooling2D(2)(x)
+
+    for i in range(3):
+        x = thrifty_imb(x)
+        x = UpSampling2D(interpolation="bilinear")(x)
+        x = Concatenate()([x, skips.pop(-1)])
+    # semantic segmentation output with extra (irrelevant) channel
+    x = Dense(n_classes + 1, activation='softmax')(x)
+    # reduce sum over width / height
+    x = Lambda(lambda z: tf.reduce_sum(z[:, :, :, :-1], axis=(1, 2)))(x)
+    # want to re-normalize without destroying the gradient
+    # ideally would just divide by sum
+    outputs = Lambda(lambda z: tf.linalg.normalize(z, 1, axis=-1)[0])(x)
+
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'thrifty_model_{"%02d" % time()}')
+
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def get_emb(sin_inp):
+    """
+    Gets a base embedding for one dimension with sin and cos intertwined
+    """
+    emb = tf.stack((tf.sin(sin_inp), tf.cos(sin_inp)), -1)
+    emb = tf.reshape(emb, (*emb.shape[:-2], -1))
+    return emb
+
+
+class TFPositionalEncoding2D(tf.keras.layers.Layer):
+    def __init__(self, channels: int, dtype=tf.float32):
+        """
+        Args:
+            channels int: The last dimension of the tensor you want to apply pos emb to.
+        Keyword Args:
+            dtype: output type of the encodings. Default is "tf.float32".
+        """
+        super(TFPositionalEncoding2D, self).__init__()
+
+        self.channels = int(2 * np.ceil(channels / 4))
+        self.inv_freq = np.float32(
+            1
+            / np.power(
+                10000, np.arange(0, self.channels, 2) / np.float32(self.channels)
+            )
+        )
+        self.cached_penc = None
+
+    @tf.function
+    def call(self, inputs):
+        """
+        :param tensor: A 4d tensor of size (batch_size, x, y, ch)
+        :return: Positional Encoding Matrix of size (batch_size, x, y, ch)
+        """
+        if len(inputs.shape) != 4:
+            raise RuntimeError("The input tensor has to be 4d!")
+
+        if self.cached_penc is not None and self.cached_penc.shape == inputs.shape:
+            return self.cached_penc
+
+        self.cached_penc = None
+        _, x, y, org_channels = inputs.shape
+
+        dtype = self.inv_freq.dtype
+
+        pos_x = tf.range(x, dtype=dtype)
+        pos_y = tf.range(y, dtype=dtype)
+
+        sin_inp_x = tf.einsum("i,j->ij", pos_x, self.inv_freq)
+        sin_inp_y = tf.einsum("i,j->ij", pos_y, self.inv_freq)
+
+        emb_x = tf.expand_dims(get_emb(sin_inp_x), 1)
+        emb_y = tf.expand_dims(get_emb(sin_inp_y), 0)
+
+        emb_x = tf.tile(emb_x, (1, y, 1))
+        emb_y = tf.tile(emb_y, (x, 1, 1))
+        emb = tf.concat((emb_x, emb_y), -1)
+        self.cached_penc = tf.repeat(
+            emb[None, :, :, :org_channels], tf.shape(inputs)[0], axis=0
+        )
+        return self.cached_penc
+
+
+def build_hallucinetv4_upcycle_plus_plus(conv_filters,
+                                         conv_size,
+                                         attention_heads,
+                                         learning_rate,
+                                         image_size,
+                                         iterations=24,
+                                         loss='categorical_crossentropy',
+                                         pooling='max',
+                                         l1=None, l2=None,
+                                         activation=lambda x: x * tf.nn.relu6(x + 3) / 6,
+                                         n_classes=10,
+                                         downsample=3,
+                                         dropout=0.1,
+                                         depth=2,
+                                         skips=2,
+                                         **kwargs):
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        dense_layers = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
+    inputs = Input(image_size)
+
+    conv_params = {
+        'use_bias': False,
+        'kernel_initializer': tf.keras.initializers.GlorotUniform(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'padding': 'same'
+    }
+
+    x = inputs
+
+    # x = Concatenate()([x, TFPositionalEncoding2D(1)(x)])
+
+    x = Lambda(lambda z: tf.pad(z, ((0, 0), (0, 0), (0, 0), (0, conv_filters[0] - z.shape[-1]))))(x)
+
+    for block in range(len(conv_filters)):
+        thrifty_exp = Conv2D(filters=conv_filters[block], kernel_size=1, activation=None, **conv_params)
+
+        thrifty_convs = [
+            Conv2D(conv_filters[block], kernel_size=3, activation=activation, **conv_params),
+            Conv2D(conv_filters[block], kernel_size=3, activation=None, **conv_params)
+        ]
+
+        thrifty_inv3 = UpSampling2D(2)
+
+        thrifty_squeeze = Conv2D(filters=conv_filters[block], kernel_size=1, activation=activation, **conv_params)
+
+        def thrifty_imb(z, ):
+            exp, exc, inv, sqzn = thrifty_exp, thrifty_convs, thrifty_inv3, thrifty_squeeze
+            inp = z
+            z = MaxPooling2D(2, 2, 'same')(z)
+            z = Concatenate()([inv(e(z)) for e in exc])
+            z = Conv2D(filters=conv_filters[block] // 2, kernel_size=1, activation=activation, **conv_params)(z)
+            z0 = Concatenate()([e(inp) for e in exc] + [inp])
+            z0 = Conv2D(filters=conv_filters[block] // 2, kernel_size=1, activation=activation, **conv_params)(z0)
+            z = Concatenate()([z0, z])
+            z = BatchNormalization()(z)
+            return z
+
+        prev_layers = [thrifty_imb(x)]
+        for i in range(iterations):
+            x = thrifty_imb(x)
+            prev_layers.append(x)
+            x = Add()(prev_layers[-skips:])
+            x = BatchNormalization()(x)
+        x = Add()(prev_layers)
+    # semantic segmentation output with extra (irrelevant) channel
+    x = Dense(n_classes + 1, activation='relu', use_bias=False)(x)
+    # reduce sum over width / height
+    y = Lambda(
+        lambda z: tf.reduce_sum(tf.stack([z[:, :, :, -1] / (n_classes*2) for i in range(n_classes)], -1),
+                                axis=(1, 2)))(x)
+
+    x = Lambda(lambda z: tf.reduce_sum(z[:, :, :, :-1], axis=(1, 2)))(x)
+    x = Add()([x, y, tf.ones_like(x)*(2**-16)])
+    # want to re-normalize without destroying the gradient
+    # ideally would just divide by sum
+    outputs = Lambda(lambda z: tf.linalg.normalize(z, 1, axis=-1)[0])(x)
+
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'thrifty_model_{"%02d" % time()}')
+
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_hallucinetv4_upcycle_plus(conv_filters,
+                                    conv_size,
+                                    attention_heads,
+                                    learning_rate,
+                                    image_size,
+                                    iterations=24,
+                                    loss='categorical_crossentropy',
+                                    pooling='max',
+                                    l1=None, l2=None,
+                                    activation=lambda x: x * tf.nn.relu6(x + 3) / 6,
+                                    n_classes=10,
+                                    downsample=3,
+                                    dropout=0.1,
+                                    depth=2,
+                                    skips=2,
+                                    **kwargs):
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        dense_layers = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
+    inputs = Input(image_size)
+
+    conv_params = {
+        'use_bias': False,
+        'kernel_initializer': tf.keras.initializers.GlorotUniform(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'padding': 'same'
+    }
+
+    segment = Dense(n_classes + 1, activation='softmax')
+
+    x = inputs
+
+    x = Lambda(lambda z: tf.pad(z, ((0, 0), (0, 0), (0, 0), (0, conv_filters[0] - z.shape[-1]))))(x)
+
+    for block in range(len(conv_filters)):
+        thrifty_exp = Conv2D(filters=conv_filters[block] * 2, kernel_size=1, activation=None, **conv_params)
+
+        thrifty_convs = [DepthwiseConv2D(kernel_size=3,
+                                         activation=activation, **conv_params),
+                         DepthwiseConv2D(kernel_size=5,
+                                         activation=activation, **conv_params),
+                         DepthwiseConv2D(kernel_size=7,
+                                         activation=activation, **conv_params),
+                         MaxPooling2D(3, 1, padding='same')]
+
+        thrifty_squeeze = Conv2D(filters=conv_filters[block], kernel_size=1, activation=activation, **conv_params)
+
+        def thrifty_imb(z, exp, exc, sqz):
+            inp = z
+            z = exp(z)
+            z = Concatenate()([e(z) for e in exc] + [inp])
+            z = sqz(z)
+            z = BatchNormalization()(z)
+            return z
+
+        prev_layers = [x]
+        for i in range(iterations):
+            x = thrifty_imb(x, thrifty_exp, thrifty_convs, thrifty_squeeze)
+            x = Add()(prev_layers[-skips:] + [x])
+            x = BatchNormalization()(x)
+            prev_layers.append(x)
+        # semantic segmentation output with extra (irrelevant) channel
+        x = Add()(prev_layers)
+    x = segment(x)
+    # reduce sum over width / height
+    y = Lambda(lambda z: tf.reduce_sum(tf.stack([z[:, :, :, -1] for i in range(n_classes)], -1), axis=(1, 2)))(x)
+
+    x = Lambda(lambda z: tf.reduce_sum(z[:, :, :, :-1], axis=(1, 2)))(x)
+    x = Add()([x, y])
+
+    outputs = Lambda(lambda z: tf.linalg.normalize(z, 1, axis=-1)[0])(x)
+
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'thrifty_model_{"%02d" % time()}')
+
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_hallucinetv4_upcycle(conv_filters,
+                               conv_size,
+                               attention_heads,
+                               learning_rate,
+                               image_size,
+                               iterations=24,
+                               loss='categorical_crossentropy',
+                               pooling='max',
+                               l1=None, l2=None,
+                               activation=lambda x: x * tf.nn.relu6(x + 3) / 6,
+                               n_classes=10,
+                               downsample=3,
+                               dropout=0.1,
+                               depth=2,
+                               skips=2,
+                               **kwargs):
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        dense_layers = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
+    inputs = Input(image_size)
+
+    conv_params = {
+        'use_bias': False,
+        'kernel_initializer': tf.keras.initializers.GlorotUniform(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'padding': 'same'
+    }
+
+    segment = Dense(n_classes + 1, activation='softmax')
+
+    x = inputs
+
+    x = Lambda(lambda z: tf.pad(z, ((0, 0), (0, 0), (0, 0), (0, conv_filters[0] - z.shape[-1]))))(x)
+
+    for block in range(len(conv_filters)):
+        thrifty_exp = Conv2D(filters=conv_filters[block] * 2, kernel_size=1, activation=None, **conv_params)
+
+        thrifty_convs = [DepthwiseConv2D(kernel_size=3,
+                                         activation=activation, **conv_params),
+                         DepthwiseConv2D(kernel_size=5,
+                                         activation=activation, **conv_params),
+                         MaxPooling2D(3, 1, padding='same')]
+
+        thrifty_squeeze = Conv2D(filters=conv_filters[block], kernel_size=1, activation=activation, **conv_params)
+
+        def thrifty_imb(z, exp, exc, sqz):
+            inp = z
+            z = exp(z)
+            z = Concatenate()([e(z) for e in exc] + [inp])
+            z = sqz(z)
+            z = BatchNormalization()(z)
+            return z
+
+        prev_layers = [x]
+        for i in range(iterations):
+            x = thrifty_imb(x, thrifty_exp, thrifty_convs, thrifty_squeeze)
+            x = Add()(prev_layers[-skips:] + [x])
+            x = BatchNormalization()(x)
+            prev_layers.append(x)
+        # semantic segmentation output with extra (irrelevant) channel
+        x = Add()(prev_layers)
+    x = segment(x)
+    # reduce sum over width / height
+    y = Lambda(lambda z: tf.reduce_sum(tf.stack([z[:, :, :, -1] for i in range(n_classes)], -1), axis=(1, 2)))(x)
+
+    x = Lambda(lambda z: tf.reduce_sum(z[:, :, :, :-1], axis=(1, 2)))(x)
+    x = Add()([x, y])
+
+    outputs = Lambda(lambda z: tf.linalg.normalize(z, 1, axis=-1)[0])(x)
+
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'thrifty_model_{"%02d" % time()}')
+
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
 def build_hallucinet_upcycle(conv_filters,
                              conv_size,
                              attention_heads,
@@ -361,8 +894,100 @@ def build_hallucinet_upcycle(conv_filters,
                              downsample=3,
                              dropout=0.1,
                              depth=2,
-                             skips=4,
+                             skips=2,
                              **kwargs):
+    if isinstance(conv_filters, str):
+        conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
+    if isinstance(conv_size, str):
+        conv_size = [int(i) for i in conv_size.strip('[]').split(', ')]
+    if isinstance(attention_heads, str):
+        dense_layers = [int(i) for i in attention_heads.strip('[]').split(', ')]
+
+    inputs = Input(image_size)
+
+    conv_params = {
+        'use_bias': False,
+        'kernel_initializer': tf.keras.initializers.GlorotUniform(),
+        'bias_initializer': 'zeros',
+        'kernel_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'bias_regularizer': tf.keras.regularizers.L1L2(l1=l1, l2=l2),
+        'padding': 'same'
+    }
+
+    x = inputs
+
+    x = Lambda(lambda z: tf.pad(z, ((0, 0), (0, 0), (0, 0), (0, conv_filters[0] - z.shape[-1]))))(x)
+
+    for block in range(len(conv_filters)):
+        thrifty_exp = Conv2D(filters=conv_filters[block] * 2, kernel_size=1, activation=None, **conv_params)
+
+        thrifty_convs = [DepthwiseConv2D(kernel_size=3,
+                                         activation=activation, **conv_params),
+                         DepthwiseConv2D(kernel_size=5,
+                                         activation=activation, **conv_params),
+                         MaxPooling2D(3, 1, padding='same')]
+
+        thrifty_squeeze = Conv2D(filters=conv_filters[block], kernel_size=1, activation=activation, **conv_params)
+
+        def thrifty_imb(z, exp, exc, sqz):
+            inp = z
+            z = exp(z)
+            z = Concatenate()([e(z) for e in exc] + [inp])
+            z = sqz(z)
+            z = BatchNormalization()(z)
+            return z
+
+        prev_layers = [x]
+        for i in range(iterations):
+            x = thrifty_imb(x, thrifty_exp, thrifty_convs, thrifty_squeeze)
+            prev_layers.append(x)
+            x = Add()(prev_layers[-skips:])
+            x = BatchNormalization()(x)
+    # semantic segmentation output with extra (irrelevant) channel
+    x = Dense(n_classes + 1, activation='softmax')(x)
+    # reduce sum over width / height
+    y = Lambda(lambda z: tf.reduce_sum(tf.stack([z[:, :, :, -1] for i in range(n_classes)], -1), axis=(1, 2)))(x)
+
+    x = Lambda(lambda z: tf.reduce_sum(z[:, :, :, :-1], axis=(1, 2)))(x)
+    x = Add()([x, y])
+    # want to re-normalize without destroying the gradient
+    # ideally would just divide by sum
+    outputs = Lambda(lambda z: tf.linalg.normalize(z, 1, axis=-1)[0])(x)
+
+    accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
+
+    opt = tf.keras.optimizers.Nadam(learning_rate=learning_rate,
+                                    beta_1=0.9, beta_2=0.999,
+                                    epsilon=None, decay=0.99)
+
+    opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
+
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs],
+                           name=f'thrifty_model_{"%02d" % time()}')
+
+    model.compile(loss=loss,
+                  optimizer=opt,
+                  metrics=[accuracy])
+
+    return model
+
+
+def build_thrifty_upcycle(conv_filters,
+                          conv_size,
+                          attention_heads,
+                          learning_rate,
+                          image_size,
+                          iterations=24,
+                          loss='categorical_crossentropy',
+                          pooling='max',
+                          l1=None, l2=None,
+                          activation=lambda x: x * tf.nn.relu6(x + 3) / 6,
+                          n_classes=10,
+                          downsample=3,
+                          dropout=0.1,
+                          depth=2,
+                          skips=2,
+                          **kwargs):
     if isinstance(conv_filters, str):
         conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
     if isinstance(conv_size, str):

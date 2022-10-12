@@ -11,7 +11,8 @@ from time import time
 # model-related code I have written (supplied locally)
 from data_structures import ModelData
 from data_generator import augment_with_neighbors, to_dataset, cifar10_dset, cifar100_dset, blended_dset, bc_plus, \
-    generalized_bc_plus, load_unlabeled, get_cv_rotation, get_dataframes_self_train, mixup_dset
+    generalized_bc_plus, load_unlabeled, get_cv_rotation, get_dataframes_self_train, mixup_dset, cats_dogs, deep_weeds, \
+    citrus_leaves
 from transforms import custom_rand_augment_object
 from make_figure import explore_image_dataset
 
@@ -409,6 +410,180 @@ def DOT_CV(args, da_fn, da_args, network_fn, network_params):
                           class_mode='categorical', center=True, cache=args.cache, repeat=False)
     train_dset = to_dataset(train_df, shuffle=True, batch_size=args.batch, seed=42, prefetch=8,
                             class_mode='categorical', center=True, cache=args.cache)
+
+    # define our randAugment object
+    rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
+    # data augmentation strategy
+    if args.randAugment:
+        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                                    num_parallel_calls=tf.data.AUTOTUNE, )
+
+    # perform MSDA
+    train_dset = da_fn(train_dset, **da_args)
+    # peek at the dataset instead of training
+    if args.peek:
+        explore_image_dataset(train_dset, 8)
+        exit(-1)
+    if args.distributed:
+        # create the scope
+        strategy = tf.distribute.MirroredStrategy()
+        with strategy.scope():
+            # build the model (in the scope)
+            model = network_fn(**network_params)
+    else:
+        model = network_fn(**network_params)
+
+    if args.hyperband:
+        return start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                              train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
+
+    # train the model
+    model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                                train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
+    # save the model
+    try:
+        with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+    except Exception as e:
+        print(e)
+        with open(f'./{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+
+
+def cd(args, da_fn, da_args, network_fn, network_params):
+
+    paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
+             'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
+             'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
+
+    print('getting dsets...')
+    if args.cross_validate:
+        print(f'({args.cv_k}-fold) cross-validation rotation: {args.cv_rotation}')
+        train_df, withheld_df, val_df, test_df = get_cv_rotation(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction, k=args.cv_k, rotation=args.cv_rotation)
+    else:
+        train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction)
+
+    train_dset, val_dset, test_dset = cats_dogs(args.batch, cache=args.cache)
+
+    # define our randAugment object
+    rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
+    # data augmentation strategy
+    if args.randAugment:
+        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                                    num_parallel_calls=tf.data.AUTOTUNE, )
+
+    # perform MSDA
+    train_dset = da_fn(train_dset, **da_args)
+    # peek at the dataset instead of training
+    if args.peek:
+        explore_image_dataset(train_dset, 8)
+        exit(-1)
+    if args.distributed:
+        # create the scope
+        strategy = tf.distribute.MirroredStrategy()
+        with strategy.scope():
+            # build the model (in the scope)
+            model = network_fn(**network_params)
+    else:
+        model = network_fn(**network_params)
+
+    if args.hyperband:
+        return start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                              train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
+
+    # train the model
+    model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                                train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
+    # save the model
+    try:
+        with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+    except Exception as e:
+        print(e)
+        with open(f'./{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+
+
+def dw(args, da_fn, da_args, network_fn, network_params):
+
+    paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
+             'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
+             'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
+
+    print('getting dsets...')
+    if args.cross_validate:
+        print(f'({args.cv_k}-fold) cross-validation rotation: {args.cv_rotation}')
+        train_df, withheld_df, val_df, test_df = get_cv_rotation(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction, k=args.cv_k, rotation=args.cv_rotation)
+    else:
+        train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction)
+
+    train_dset, val_dset, test_dset = deep_weeds(args.batch, cache=args.cache)
+
+    # define our randAugment object
+    rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)
+    # data augmentation strategy
+    if args.randAugment:
+        train_dset = train_dset.map(lambda x, y: (tf.py_function(rand_aug, [x], [tf.float32])[0], y),
+                                    num_parallel_calls=tf.data.AUTOTUNE, )
+
+    # perform MSDA
+    train_dset = da_fn(train_dset, **da_args)
+    # peek at the dataset instead of training
+    if args.peek:
+        explore_image_dataset(train_dset, 8)
+        exit(-1)
+    if args.distributed:
+        # create the scope
+        strategy = tf.distribute.MirroredStrategy()
+        with strategy.scope():
+            # build the model (in the scope)
+            model = network_fn(**network_params)
+    else:
+        model = network_fn(**network_params)
+
+    if args.hyperband:
+        return start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                              train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
+
+    # train the model
+    model_data = start_training(args, model, train_dset, val_dset, network_fn, network_params,
+                                train_steps=args.steps_per_epoch, val_steps=len(val_df) // args.batch)
+    # save the model
+    try:
+        with open(f'{os.curdir}/../results/{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+    except Exception as e:
+        print(e)
+        with open(f'./{generate_fname(args)}', 'wb') as fp:
+            pickle.dump(model_data, fp)
+
+
+def cl(args, da_fn, da_args, network_fn, network_params):
+
+    paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
+             'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
+             'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
+
+    print('getting dsets...')
+    if args.cross_validate:
+        print(f'({args.cv_k}-fold) cross-validation rotation: {args.cv_rotation}')
+        train_df, withheld_df, val_df, test_df = get_cv_rotation(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction, k=args.cv_k, rotation=args.cv_rotation)
+    else:
+        train_df, withheld_df, val_df, test_df, ig = get_dataframes_self_train(
+            [os.curdir + '/../data/' + path for path in paths],
+            train_fraction=args.train_fraction)
+
+    train_dset, val_dset, test_dset = citrus_leaves(args.batch, cache=args.cache)
 
     # define our randAugment object
     rand_aug = custom_rand_augment_object(args.rand_M, args.rand_N, True)

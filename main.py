@@ -15,7 +15,7 @@ TIMESTRING = datetime.datetime.fromtimestamp(time.time()).isoformat(sep='T', tim
 from job_control import JobIterator
 from cnn_network import *
 from data_structures import *
-from experiment import cifar10, cifar100, DOT_CV, DOT_CV_self_train, get_dsets
+from experiment import cifar10, cifar100, DOT_CV, DOT_CV_self_train, get_dsets, cd, dw, cl
 
 
 def create_parser():
@@ -246,7 +246,7 @@ def exp_type_to_hyperparameters(args):
             'convex_prob': [.5],
             'steps_per_epoch': [512],
             'patience': [12],
-            'batch': [12],
+            'batch': [3],
             'lrate': [1e-3],
             'randAugment': [True],
             'peek': [False],
@@ -261,8 +261,107 @@ def exp_type_to_hyperparameters(args):
             #    'hidden': False,
             # },
             'min_delta': [.001],
-            'network_fn': [build_hallucinet_upcycle],
-            'iterations': [8, 8, 8, 8],
+            'network_fn': [build_hallucinetv4_upcycle_plus_plus],
+            'iterations': [8],
+            'downsample': [7],
+        },
+        'cd': {
+            'filters': ['[48]'],
+            'kernels': ['[3]'],
+            'hidden': ['[10]'],
+            'l1': [None],
+            'l2': [None],
+            'dropout': [0.1],
+            'train_iterations': [20],
+            'train_fraction': [1],
+            'epochs': [512],
+            'convex_dim': [2],
+            'convex_prob': [.5],
+            'steps_per_epoch': [512],
+            'patience': [32],
+            'batch': [8],
+            'lrate': [5e-4],
+            'randAugment': [True],
+            'peek': [False],
+            'convexAugment': [None],
+            'cross_validate': [False],
+            'rand_M': [.3],
+            'rand_N': [1],
+            # 'search_space': {
+            #    'dropout': True,
+            #    'l1': True,
+            #    'l2': True,
+            #    'hidden': False,
+            # },
+            'min_delta': [.001],
+            'network_fn': [build_hallucinetv4_upcycle_plus_plus, build_hallucinet_upcycle],
+            'iterations': [8],
+            'downsample': [7],
+        },
+        'dw': {
+            'filters': ['[32]'],
+            'kernels': ['[3]'],
+            'hidden': ['[10]'],
+            'l1': [None],
+            'l2': [None],
+            'dropout': [0.1],
+            'train_iterations': [20],
+            'train_fraction': [1],
+            'epochs': [512],
+            'convex_dim': [2],
+            'convex_prob': [.5],
+            'steps_per_epoch': [512],
+            'patience': [12],
+            'batch': [5],
+            'lrate': [1e-3],
+            'randAugment': [True],
+            'peek': [False],
+            'convexAugment': [None],
+            'cross_validate': [False],
+            'rand_M': [.3],
+            'rand_N': [1],
+            # 'search_space': {
+            #    'dropout': True,
+            #    'l1': True,
+            #    'l2': True,
+            #    'hidden': False,
+            # },
+            'min_delta': [.001],
+            'network_fn': [build_hallucinetv4_upcycle_plus_plus, build_hallucinet_upcycle],
+            'iterations': [12],
+            'downsample': [7],
+        },
+        'cl': {
+            'filters': ['[32]'],
+            'kernels': ['[3]'],
+            'hidden': ['[10]'],
+            'l1': [None],
+            'l2': [None],
+            'dropout': [0.1],
+            'train_iterations': [20],
+            'train_fraction': [1],
+            'epochs': [512],
+            'convex_dim': [2],
+            'convex_prob': [.5],
+            'steps_per_epoch': [512],
+            'patience': [4],
+            'batch': [8],
+            'lrate': [1e-3],
+            'randAugment': [True],
+            'peek': [False],
+            'convexAugment': [None],
+            'cross_validate': [False],
+            'rand_M': [.3],
+            'rand_N': [1],
+            # 'search_space': {
+            #    'dropout': True,
+            #    'l1': True,
+            #    'l2': True,
+            #    'hidden': False,
+            # },
+            'min_delta': [.001],
+            'network_fn': [build_hallucinetv4_upcycle_plus_plus, build_hallucinetv4_upcycle_plus],
+            'iterations': [3],
             'downsample': [7],
         },
     }
@@ -489,6 +588,62 @@ def network_switch(args, key, default):
                  'overlap': 8},
             'network_fn': args.network_fn},
 
+        'cd': {
+            'params':
+                {'learning_rate': args.lrate,
+                 'conv_filters': args.filters,
+                 'conv_size': args.kernels,
+                 'attention_heads': args.hidden,
+                 'image_size': (128, 128, 3),
+                 'n_classes': 2,
+                 'l1': args.l1,
+                 'l2': args.l2,
+                 'dropout': args.dropout,
+                 'loss': 'categorical_crossentropy',
+                 'iterations': args.iterations,
+                 'downsample': args.downsample,
+                 'pad': 24,
+                 'overlap': 8},
+            'network_fn': args.network_fn},
+
+        'dw': {
+            'params':
+                {'learning_rate': args.lrate,
+                 'conv_filters': args.filters,
+                 'conv_size': args.kernels,
+                 'attention_heads': args.hidden,
+                 'image_size': (128, 128, 3),
+                 'n_classes': 9,
+                 'l1': args.l1,
+                 'l2': args.l2,
+                 'dropout': args.dropout,
+                 'loss': 'categorical_crossentropy',
+                 'iterations': args.iterations,
+                 'downsample': args.downsample,
+                 'pad': 24,
+                 'overlap': 8},
+
+            'network_fn': args.network_fn},
+
+        'cl': {
+            'params':
+                {'learning_rate': args.lrate,
+                 'conv_filters': args.filters,
+                 'conv_size': args.kernels,
+                 'attention_heads': args.hidden,
+                 'image_size': (128, 128, 3),
+                 'n_classes': 4,
+                 'l1': args.l1,
+                 'l2': args.l2,
+                 'dropout': args.dropout,
+                 'loss': 'categorical_crossentropy',
+                 'iterations': args.iterations,
+                 'downsample': args.downsample,
+                 'pad': 24,
+                 'overlap': 8},
+
+            'network_fn': args.network_fn},
+
         'cifar10': {
             'params': {'learning_rate': args.lrate,
                        'conv_filters': args.filters,
@@ -558,7 +713,10 @@ if __name__ == '__main__':
         'da': DOT_CV,
         'cifar10': cifar10,
         'cifar100': cifar100,
-        'control': DOT_CV
+        'control': DOT_CV,
+        'cd': cd,
+        'dw': dw,
+        'cl': cl,
     }
 
     from data_generator import blended_dset, mixup_dset, bc_plus, generalized_bc_plus, fast_fourier_fuckup, fmix_dset, \
@@ -653,6 +811,5 @@ if __name__ == '__main__':
                      workers=tf.config.threading.get_inter_op_parallelism_threads())
 
         print(tuner.results_summary())
-        exit(0)
     else:
         exp_fn(args, da_fn, da_args, network_fn, network_params)
