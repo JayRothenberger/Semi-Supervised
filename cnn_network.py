@@ -640,7 +640,7 @@ def build_hallucinetv4_upcycle_plus_plus(conv_filters,
 
         thrifty_squeeze = Conv2D(filters=conv_filters[block], kernel_size=1, activation=activation, **conv_params)
 
-        def thrifty_imb(z, ):
+        def thrifty_imb(z):
             exp, exc, inv, sqzn = thrifty_exp, thrifty_convs, thrifty_inv3, thrifty_squeeze
             inp = z
             z = MaxPooling2D(2, 2, 'same')(z)
@@ -649,7 +649,7 @@ def build_hallucinetv4_upcycle_plus_plus(conv_filters,
             z0 = Concatenate()([e(inp) for e in exc] + [inp])
             z0 = Conv2D(filters=conv_filters[block] // 2, kernel_size=1, activation=activation, **conv_params)(z0)
             z = Concatenate()([z0, z])
-            z = BatchNormalization()(z)
+            z = BatchNormalization(name=f"chkpt_{time()}")(z)
             return z
 
         prev_layers = [thrifty_imb(x)]
@@ -659,18 +659,21 @@ def build_hallucinetv4_upcycle_plus_plus(conv_filters,
             x = Add()(prev_layers[-skips:])
             x = BatchNormalization()(x)
         x = Add()(prev_layers)
+    # this dense operation is over an input tensor of size (batch, width, height, channels)
     # semantic segmentation output with extra (irrelevant) channel
-    x = Dense(n_classes + 1, activation='relu', use_bias=False)(x)
+    x = Dense(n_classes + 1, activation='softmax', use_bias=False)(x)
     # reduce sum over width / height
     y = Lambda(
-        lambda z: tf.reduce_sum(tf.stack([z[:, :, :, -1] / (n_classes*2) for i in range(n_classes)], -1),
-                                axis=(1, 2)))(x)
+        lambda z: tf.reduce_sum(
+                    tf.stack([z[:, :, :, -1] / (n_classes * 2) for i in range(n_classes)], -1), axis=(1, 2)
+                               )
+              )(x)
 
     x = Lambda(lambda z: tf.reduce_sum(z[:, :, :, :-1], axis=(1, 2)))(x)
-    x = Add()([x, y, tf.ones_like(x)*(2**-16)])
+    x = Add()([x, y, tf.ones_like(x)*(2**(-10))])
     # want to re-normalize without destroying the gradient
-    # ideally would just divide by sum
     outputs = Lambda(lambda z: tf.linalg.normalize(z, 1, axis=-1)[0])(x)
+    # outputs shape is (batch, n_classes)
 
     accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
 
@@ -691,21 +694,21 @@ def build_hallucinetv4_upcycle_plus_plus(conv_filters,
 
 
 def build_hallucinetv4_upcycle_plus(conv_filters,
-                                    conv_size,
-                                    attention_heads,
-                                    learning_rate,
-                                    image_size,
-                                    iterations=24,
-                                    loss='categorical_crossentropy',
-                                    pooling='max',
-                                    l1=None, l2=None,
-                                    activation=lambda x: x * tf.nn.relu6(x + 3) / 6,
-                                    n_classes=10,
-                                    downsample=3,
-                                    dropout=0.1,
-                                    depth=2,
-                                    skips=2,
-                                    **kwargs):
+                                         conv_size,
+                                         attention_heads,
+                                         learning_rate,
+                                         image_size,
+                                         iterations=24,
+                                         loss='categorical_crossentropy',
+                                         pooling='max',
+                                         l1=None, l2=None,
+                                         activation=lambda x: x * tf.nn.relu6(x + 3) / 6,
+                                         n_classes=10,
+                                         downsample=3,
+                                         dropout=0.1,
+                                         depth=2,
+                                         skips=2,
+                                         **kwargs):
     if isinstance(conv_filters, str):
         conv_filters = [int(i) for i in conv_filters.strip('[]').split(', ')]
     if isinstance(conv_size, str):
@@ -724,49 +727,55 @@ def build_hallucinetv4_upcycle_plus(conv_filters,
         'padding': 'same'
     }
 
-    segment = Dense(n_classes + 1, activation='softmax')
-
     x = inputs
+
+    # x = Concatenate()([x, TFPositionalEncoding2D(1)(x)])
 
     x = Lambda(lambda z: tf.pad(z, ((0, 0), (0, 0), (0, 0), (0, conv_filters[0] - z.shape[-1]))))(x)
 
     for block in range(len(conv_filters)):
-        thrifty_exp = Conv2D(filters=conv_filters[block] * 2, kernel_size=1, activation=None, **conv_params)
+        thrifty_exp = Conv2D(filters=conv_filters[block], kernel_size=1, activation=None, **conv_params)
 
-        thrifty_convs = [DepthwiseConv2D(kernel_size=3,
-                                         activation=activation, **conv_params),
-                         DepthwiseConv2D(kernel_size=5,
-                                         activation=activation, **conv_params),
-                         DepthwiseConv2D(kernel_size=7,
-                                         activation=activation, **conv_params),
-                         MaxPooling2D(3, 1, padding='same')]
+        thrifty_convs = [
+            Conv2D(conv_filters[block], kernel_size=3, activation=activation, **conv_params),
+            Conv2D(conv_filters[block], kernel_size=3, activation=None, **conv_params)
+        ]
+
+        thrifty_inv3 = UpSampling2D(2)
 
         thrifty_squeeze = Conv2D(filters=conv_filters[block], kernel_size=1, activation=activation, **conv_params)
 
-        def thrifty_imb(z, exp, exc, sqz):
+        def thrifty_imb(z):
+            exp, exc, inv, sqzn = thrifty_exp, thrifty_convs, thrifty_inv3, thrifty_squeeze
             inp = z
-            z = exp(z)
-            z = Concatenate()([e(z) for e in exc] + [inp])
-            z = sqz(z)
-            z = BatchNormalization()(z)
+            z = Concatenate()([e(inp) for e in exc] + [inp])
+            z = Conv2D(filters=conv_filters[block], kernel_size=1, activation=activation, **conv_params)(z)
+            # name this layer
+            z = BatchNormalization(name=f"chkpt_{time()}")(z)
             return z
 
-        prev_layers = [x]
+        prev_layers = [thrifty_imb(x)]
         for i in range(iterations):
-            x = thrifty_imb(x, thrifty_exp, thrifty_convs, thrifty_squeeze)
-            x = Add()(prev_layers[-skips:] + [x])
-            x = BatchNormalization()(x)
+            x = thrifty_imb(x)
             prev_layers.append(x)
-        # semantic segmentation output with extra (irrelevant) channel
+            x = Add()(prev_layers[-skips:])
+            x = BatchNormalization()(x)
         x = Add()(prev_layers)
-    x = segment(x)
+    # this dense operation is over an input tensor of size (batch, width, height, channels)
+    # semantic segmentation output with extra (irrelevant) channel
+    x = Dense(n_classes + 1, activation='softmax', use_bias=False)(x)
     # reduce sum over width / height
-    y = Lambda(lambda z: tf.reduce_sum(tf.stack([z[:, :, :, -1] for i in range(n_classes)], -1), axis=(1, 2)))(x)
+    y = Lambda(
+        lambda z: tf.reduce_sum(
+                    tf.stack([z[:, :, :, -1] / (n_classes * 2) for i in range(n_classes)], -1), axis=(1, 2)
+                               )
+              )(x)
 
     x = Lambda(lambda z: tf.reduce_sum(z[:, :, :, :-1], axis=(1, 2)))(x)
-    x = Add()([x, y])
-
+    x = Add()([x, y, tf.ones_like(x)*(2**(-10))])
+    # want to re-normalize without destroying the gradient
     outputs = Lambda(lambda z: tf.linalg.normalize(z, 1, axis=-1)[0])(x)
+    # outputs shape is (batch, n_classes)
 
     accuracy = 'sparse_categorical_accuracy' if loss == 'sparse_categorical_crossentropy' else 'categorical_accuracy'
 

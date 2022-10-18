@@ -6,11 +6,45 @@ import numpy as np
 import tensorflow as tf
 import gc
 
+from lime import lime_image
+import shap
+
+from skimage.io import imread
+from skimage.segmentation import mark_boundaries
+
 from data_generator import get_dataframes_self_train, to_dataset, mixup_dset, fast_fourier_fuckup, cifar10_dset, \
     fmix_dset, foff_dset, cats_dogs, deep_weeds, citrus_leaves
 
 from data_structures import ModelEvaluator
 from robustness import pgd_evaluation
+
+
+def explain_image_classifier_with_lime(model, instance, n_classes):
+    """
+    show a visual explanation using LIME for an image classification keras Model and a image instance with matplotlib
+    """
+    instance = np.array(instance)
+    explainer = lime_image.LimeImageExplainer(kernel_width=.125)
+    explanation = explainer.explain_instance(instance.astype(np.double), model.predict, top_labels=n_classes,
+                                             hide_color=0, num_samples=2048, batch_size=16)
+    temp, mask = explanation.get_image_and_mask(explanation.top_labels[0], positive_only=True, num_features=5,
+                                                hide_rest=True)
+    plt.imshow(mark_boundaries(temp / 2 + .5, mask))
+    plt.show()
+
+
+def explain_image_classifier_with_shap(model, instance, class_names):
+    instance = np.array(instance).astype(np.double)
+    print(instance.shape)
+    # define a masker that is used to mask out partitions of the input image, this one uses a blurred background
+    masker = shap.maskers.Image("blur(128,128)", instance[0].shape)
+
+    # By default the Partition explainer is used for all  partition explainer
+    explainer = shap.Explainer(model.predict, masker, output_names=class_names)
+
+    # here we use 500 evaluations of the underlying model to estimate the SHAP values
+    shap_values = explainer(np.expand_dims(instance[0], 0), max_evals=4096, batch_size=64, outputs=shap.Explanation.argsort.flip)
+    shap.image_plot(shap_values)
 
 
 def varying_args(evaluator):
@@ -175,13 +209,14 @@ def get_mask(model, image):
     for i, layer in enumerate(model.layers[::-1]):
         if 'dense' in layer.name:
             d = -i - 1
+            new_outputs.append(layer.output)
             break
     else:
         raise ValueError('dense layer not found')
 
     for i, layer in enumerate(model.layers):
         try:
-            if 'batch_' in layer.name:
+            if 'chkpt' in layer.name:
                 new_outputs.append(model.layers[d](layer.output))
         except Exception as e:
             print(e)
@@ -283,7 +318,7 @@ def labeled_multi_image(rows, n_cols, row_labs=None, col_labs=None, colors=None,
     from mpl_toolkits.axes_grid1 import ImageGrid
     import matplotlib.patches as mpatches
 
-    fig = plt.figure(figsize=(n_cols, len(rows)))
+    fig = plt.figure(figsize=(n_cols*2, 2*len(rows)))
     grid = ImageGrid(fig, 111,  # similar to subplot(111)
                      nrows_ncols=(len(rows), n_cols),  # creates 2x2 grid of axes
                      axes_pad=0.1,  # pad between axes in inch.
@@ -352,7 +387,7 @@ def show_mask(dset, num_images, model, class_names, fname=''):
         img = np.stack([img for i in range(im.shape[-1])], -1)
 
         # lmao
-        im = tf.nn.relu(im - img)
+        im = tf.nn.relu(im - (img / len(class_names)))
         im, colors = color_squish(im)
         print(im.shape, ima.shape)
         img = (tf.cast(im, tf.float32) + ima) * .5
@@ -390,32 +425,50 @@ def show_mask(dset, num_images, model, class_names, fname=''):
 
 
 if __name__ == "__main__":
+    # paths to the dot data
     paths = ['bronx_allsites/wet', 'bronx_allsites/dry', 'bronx_allsites/snow',
              'ontario_allsites/wet', 'ontario_allsites/dry', 'ontario_allsites/snow',
              'rochester_allsites/wet', 'rochester_allsites/dry', 'rochester_allsites/snow']
-
-    print('getting dsets...')
-
+    # get the dataframes that hold the [image path, class] information
     _, _, val_df, test_df, _ = get_dataframes_self_train(
         [os.curdir + '/../data/' + path for path in paths],
         train_fraction=1)
-
+    # prepare the gpu for computation
     prep_gpu(True)
-    train, val, test = citrus_leaves(batch_size=8)
-    class_names = ['black spot', 'canker', 'greening', 'healthy']  # citrus leaves
-    # test = to_dataset(test_df, class_mode='categorical')
-    # class_names = ['dry', 'snow', 'wet']  # DOT
-    # train, val, test = deep_weeds(batch_size=16)
-    # class_names = ['chinee', 'lantana', 'parkinsonia', 'parenthenium',
-    # 'prickly', 'rubber', 'siam', 'snake', 'none']  # deep weeds
-    # train, val, test = cats_dogs(batch_size=16)
-    # class_names = ['cats', 'dogs']  # cats dogs
-    # explore_image_dataset(val, 10)
+    # switch that will match loaded models with the appropriate dataset
+    exp_type_to_dset = {
+        'da': to_dataset(test_df, class_mode='categorical'),
+        'cd': cats_dogs(batch_size=16)[-1],
+        'dw': deep_weeds(batch_size=16)[-1],
+        'cl': citrus_leaves(batch_size=8)[-1],
+    }
+    # switch that will match loaded models with the appropriate class names
+    exp_type_to_classes = {
+        'da': ['dry', 'snow', 'wet'],
+        'cd': ['cats', 'dogs'],
+        'dw': ['chinee', 'lantana', 'parkinsonia', 'parenthenium', 'prickly', 'rubber', 'siam', 'snake', 'none'],
+        'cl': ['black spot', 'canker', 'greening', 'healthy'],
+    }
+
+    exp_type_to_path = {
+        'da': 'dot',
+        'cd': 'cats_dogs',
+        'dw': 'deep_weeds',
+        'cl': 'citrus_leaves',
+    }
+
     evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/citrus_leaves/', fbase='')
 
-    for i, model in enumerate(evaluator.models):
+    for i, model in enumerate(evaluator.models[::-1]):
         print(max(model.history['val_categorical_accuracy']))
-        show_mask(test, 4, model, class_names, str(i))
+        test = exp_type_to_dset[model.args.exp_type]
+        class_names = exp_type_to_classes[model.args.exp_type]
+        show_mask(test, 1, model, class_names, str(i))
+        keras_model = model.get_model()
+        for x, y in iter(test):
+            explain_image_classifier_with_lime(keras_model, x[0], len(class_names))
+            explain_image_classifier_with_shap(keras_model, x, class_names)
+            break
 
     exit()
     evaluator = update_evaluator(ModelEvaluator([]), os.curdir + '/../results/params/', fbase='')
